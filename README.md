@@ -8,7 +8,7 @@ A workbench for protein structures: open or fetch a structure, look at it, style
 what holds it together, render a figure of it, and run structure prediction on your own
 machines - with an assistant in the side panel that can do all of the same things.
 
-Version 0.0.0. macOS (Apple silicon) is the platform it is built and tested on.
+Version 0.1.0. macOS (Apple silicon) is the platform it is built and tested on.
 
 ## Download
 
