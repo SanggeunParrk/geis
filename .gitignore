@@ -1,0 +1,10 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+.DS_Store
+.ruff_cache/
+# Scratch output from development, and reference checkouts that have their own repositories.
+output/
+vendor/
+*.log

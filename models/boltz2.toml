@@ -1,0 +1,49 @@
+# Boltz-2 - MIT licensed, weights included, commercial use allowed.
+# The default structure predictor for that reason: nothing about it is gated.
+schema = 1
+id = "boltz2"
+name = "Boltz-2"
+task = "structure_prediction"
+license = "MIT"
+homepage = "https://boltz.bio/boltz2"
+citation = "Passaro et al., Boltz-2: Joint Structure and Binding Affinity Prediction (2025)"
+description = """
+Structure and binding-affinity prediction. Runs from a FASTA input; downloads its own
+weights on first use into the cache directory below."""
+
+[requirements]
+gpu = "recommended"
+vram_gb = 24
+runtime = "python"
+weights = "auto"
+disk_gb = 20
+needs_binaries = ["boltz"]
+notes = "pip install boltz. First run downloads weights (~5 GB)."
+
+[inputs]
+# Boltz reads the chain id and entity type out of the FASTA title and rejects a record
+# without them, so a pasted sequence is titled the way it expects.
+sequence = { type = "fasta", required = true, fasta_header = "A|protein", label = "Sequence", help = "Protein sequence, or Boltz FASTA: one >CHAIN|protein entry per chain" }
+recycling_steps = { type = "int", default = 3, min = 1, max = 10, label = "Recycling steps" }
+diffusion_samples = { type = "int", default = 1, min = 1, max = 25, label = "Samples" }
+use_msa_server = { type = "bool", default = true, label = "Use the public MSA server", help = "Off if you run MMseqs2 yourself - the public server rate-limits" }
+
+# boltz writes into <out_dir>/boltz_results_<name>/predictions/..., so the patterns are
+# recursive rather than pinned to a layout that may change between releases.
+[outputs]
+structures = { type = "structure", pattern = "**/predictions/**/*.cif", primary = true }
+confidence = { type = "json", pattern = "**/confidence*.json" }
+
+[[run]]
+label = "predict"
+command = """
+msa_flag=
+if [ {{input.use_msa_server}} = true ]; then msa_flag=--use_msa_server; fi
+boltz predict {{input.sequence.path}} \
+  --out_dir {{job.workdir}} \
+  --recycling_steps {{input.recycling_steps}} \
+  --diffusion_samples {{input.diffusion_samples}} \
+  --output_format mmcif \
+  $msa_flag \
+  --override
+"""

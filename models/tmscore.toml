@@ -1,0 +1,45 @@
+# TM-score, by way of US-align: how alike two structures are, on a scale where 1 is the
+# same fold exactly and anything under about 0.2 is unrelated. One C++ file, compiled where
+# it is installed - which is why it is an extension and not something this app ships.
+schema = 1
+id = "tmscore"
+name = "TM-score (US-align)"
+kind = "extension"
+task = "custom"
+license = "Free for academic and commercial use, with attribution"
+homepage = "https://zhanggroup.org/US-align/"
+citation = "Zhang, Shine, Pyle & Zhang, US-align: universal structure alignments of proteins, nucleic acids, and macromolecular complexes, Nat Methods 19:1109 (2022)"
+description = """
+Aligns two structures and scores how alike they are (TM-score, RMSD, aligned length).
+Works on proteins and nucleic acids, PDB or mmCIF."""
+
+[requirements]
+gpu = "none"
+runtime = "binary"
+weights = "none"
+notes = "Installing downloads one source file and compiles it, so the host needs a C++ compiler (c++)."
+
+[install]
+download_mb = 1
+steps = [
+  "mkdir -p {{ext.dir}}",
+  "curl -fsSL -o {{ext.dir}}/USalign.cpp https://zhanggroup.org/US-align/bin/module/USalign.cpp",
+  "c++ -O3 -ffast-math -o {{ext.dir}}/USalign {{ext.dir}}/USalign.cpp",
+  "{{ext.dir}}/USalign -h > /dev/null 2>&1 || test -x {{ext.dir}}/USalign",
+]
+
+[inputs]
+model = { type = "file", required = true, extensions = ["pdb", "cif", "mmcif", "ent"], label = "Structure", help = "The structure being compared" }
+reference = { type = "file", required = true, extensions = ["pdb", "cif", "mmcif", "ent"], label = "Reference", help = "What it is compared against; the TM-score is normalised by each in turn" }
+multimer = { type = "bool", default = false, label = "Whole complexes", help = "Align all chains of both as complexes, rather than the first chain of each" }
+
+[outputs]
+report = { type = "log", pattern = "tmscore.txt", primary = true, label = "Scores" }
+
+[[run]]
+label = "align"
+command = """
+mode=
+if [ {{input.multimer}} = true ]; then mode="-mm 1 -ter 0"; fi
+{{ext.dir}}/USalign {{input.model.path}} {{input.reference.path}} $mode | tee {{job.workdir}}/tmscore.txt
+"""

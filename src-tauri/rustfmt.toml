@@ -1,0 +1,2 @@
+# One width for code and comments alike; the comments here are prose and wrap at the same column.
+max_width = 100

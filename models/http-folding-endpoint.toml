@@ -1,0 +1,43 @@
+# Template for any hosted prediction API. Copy it, point it at your service, and adjust
+# the JSON pointers - no code changes needed.
+#
+# A deliberate limitation: this only works against a service with an actual API.
+# AlphaFold Server (alphafoldserver.com) has none, and driving its web UI would breach its
+# terms, so it is not wired in here. Use a self-hosted AlphaFold 3 (see alphafold3.toml)
+# or a service that publishes an API.
+schema = 1
+id = "http-folding-endpoint"
+name = "Hosted folding endpoint (template)"
+task = "structure_prediction"
+license = "depends on the service"
+description = """
+Submit a sequence to an HTTP prediction service, poll until it finishes, download the
+result. Edit the [http] section to match your provider's API."""
+
+[requirements]
+gpu = "none"
+runtime = "http"
+weights = "none"
+notes = "Configure an HTTP provider in Settings -> Compute with the endpoint and API key."
+
+[inputs]
+sequence = { type = "fasta", required = true, label = "Sequence" }
+
+[outputs]
+structures = { type = "structure", pattern = "outputs/*.cif", primary = true }
+response = { type = "json", pattern = "outputs/response.json" }
+
+[http]
+submit_url = "{{provider.endpoint}}/predict"
+submit_method = "POST"
+# Values are JSON-escaped, so this stays valid JSON even for multi-line FASTA.
+submit_body = '''
+{"sequence": "{{input.sequence}}", "name": "{{job.name}}"}
+'''
+id_pointer = "/id"
+poll_url = "{{provider.endpoint}}/predict/{{job.external_id}}"
+status_pointer = "/status"
+done_values = ["succeeded", "complete", "completed", "done"]
+failed_values = ["failed", "error", "cancelled"]
+result_pointer = "/outputs"
+poll_interval_secs = 10

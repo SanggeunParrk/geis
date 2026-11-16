@@ -1,0 +1,47 @@
+# AlphaFold 3.
+#
+# The code is Apache-2.0 but the weights are not: they are granted on request, for
+# non-commercial use, "only if received directly from Google", and may not be
+# redistributed. So this manifest ships no weights and cannot fetch any - it points at a
+# directory the user has filled themselves. That is what `weights = "manual"` means, and
+# the UI blocks the model until a provider has a weights directory set.
+schema = 1
+id = "alphafold3"
+name = "AlphaFold 3"
+task = "structure_prediction"
+license = "Apache-2.0 (code); model parameters under Google's own terms"
+homepage = "https://github.com/google-deepmind/alphafold3"
+description = """
+DeepMind's AlphaFold 3 inference pipeline. Requires model parameters obtained directly
+from Google under their terms of use, and an AlphaFold 3 install with its databases."""
+
+[requirements]
+gpu = "required"
+vram_gb = 40
+runtime = "python"
+weights = "manual"
+disk_gb = 700
+needs_binaries = ["python3"]
+notes = """
+Model parameters are non-commercial and must be requested from Google; they may not be
+redistributed. Set the provider's weights directory to where you unpacked them, then set
+AF3_HOME (the alphafold3 checkout) and AF3_DB_DIR (the ~630 GB databases) in that
+provider's environment. Both are read on the host that runs the job, not on this one."""
+
+[inputs]
+job_json = { type = "file", required = true, extensions = ["json"], label = "AF3 input JSON", help = "AlphaFold 3's own input format - sequences, ligands, modifications" }
+
+[outputs]
+structures = { type = "structure", pattern = "af3_output/**/*.cif", primary = true }
+confidences = { type = "json", pattern = "af3_output/**/*confidences*.json" }
+summary = { type = "json", pattern = "af3_output/**/*summary*.json" }
+
+[[run]]
+label = "run_alphafold"
+command = """
+python3 {{env.AF3_HOME}}/run_alphafold.py \
+  --json_path={{input.job_json.path}} \
+  --model_dir={{provider.weights_dir}} \
+  --db_dir={{env.AF3_DB_DIR}} \
+  --output_dir={{job.workdir}}/af3_output
+"""

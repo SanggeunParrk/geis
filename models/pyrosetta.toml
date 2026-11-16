@@ -1,0 +1,57 @@
+# PyRosetta: Rosetta's energy functions and protocols from Python. Large, and licensed -
+# free for academic and non-profit use, a commercial licence otherwise - so it is the
+# user's to install, on the machine they are entitled to run it on.
+schema = 1
+id = "pyrosetta"
+name = "PyRosetta (score)"
+kind = "extension"
+task = "custom"
+license = "Rosetta licence: free for academic and non-profit use; commercial use needs a licence from UW CoMotion"
+homepage = "https://www.pyrosetta.org"
+citation = "Chaudhury, Lyskov & Gray, PyRosetta: a script-based interface for implementing molecular modeling algorithms using Rosetta, Bioinformatics 26:689 (2010)"
+description = """
+Scores a structure with Rosetta's ref2015 energy function and writes the total and the
+per-term energies. A starting point: the same environment runs any PyRosetta script."""
+
+[requirements]
+gpu = "none"
+runtime = "python"
+weights = "none"
+disk_gb = 6
+notes = "Installs into a Python environment of its own. Needs python3 (3.9 or newer) on the host."
+
+[install]
+download_mb = 1600
+terms = "By installing you confirm you may use Rosetta under its licence: free for academic and non-profit use; commercial use requires a licence."
+steps = [
+  "mkdir -p {{ext.dir}}",
+  "python3 -m venv {{ext.dir}}/venv",
+  "{{ext.dir}}/venv/bin/pip install --upgrade pip pyrosetta-installer",
+  "{{ext.dir}}/venv/bin/python -c 'import pyrosetta_installer; pyrosetta_installer.install_pyrosetta()'",
+  "{{ext.dir}}/venv/bin/python -c 'import pyrosetta; pyrosetta.init(\"-mute all\")'",
+]
+
+[inputs]
+structure = { type = "file", required = true, extensions = ["pdb", "cif", "mmcif"], label = "Structure" }
+
+[outputs]
+scores = { type = "log", pattern = "scores.txt", primary = true, label = "Energies" }
+
+[[run]]
+label = "score"
+command = """
+{{ext.dir}}/venv/bin/python - {{input.structure.path}} {{job.workdir}}/scores.txt <<'PY'
+import sys
+import pyrosetta
+pyrosetta.init("-mute all -ignore_unrecognized_res -load_PDB_components false")
+pose = pyrosetta.pose_from_file(sys.argv[1])
+score = pyrosetta.get_fa_scorefxn()
+total = score(pose)
+lines = [f"total_score {total:.3f}", f"residues {pose.total_residue()}"]
+energies = pose.energies().total_energies()
+for term in score.get_nonzero_weighted_scoretypes():
+    lines.append(f"{term.name} {energies[term] * score.get_weight(term):.3f}")
+open(sys.argv[2], "w").write("\\n".join(lines) + "\\n")
+print("\\n".join(lines))
+PY
+"""

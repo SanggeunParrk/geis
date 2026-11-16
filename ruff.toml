@@ -1,0 +1,10 @@
+# Lint settings for the one Python file Geis ships: the Blender render script.
+# It runs inside Blender's own Python, so the target is whatever Blender bundles.
+target-version = "py311"
+line-length = 100
+include = ["src-tauri/assets/*.py"]
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "N", "C4", "RUF", "PL", "PTH", "RET", "ANN", "S", "BLE", "ARG", "ERA", "PERF"]
+# The script's limits are ordinary numbers explained where they stand.
+ignore = ["PLR2004"]

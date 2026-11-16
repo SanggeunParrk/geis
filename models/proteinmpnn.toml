@@ -1,0 +1,42 @@
+# ProteinMPNN - inverse folding: given a backbone, design sequences for it.
+# Included to prove the point that the compute layer is not folding-specific: a different
+# task, a structure input instead of a sequence, and CSV/FASTA output instead of mmCIF,
+# with no change to any Rust code.
+schema = 1
+id = "proteinmpnn"
+name = "ProteinMPNN"
+task = "sequence_design"
+license = "MIT"
+homepage = "https://github.com/dauparas/ProteinMPNN"
+citation = "Dauparas et al., Robust deep learning-based protein sequence design (Science 2022)"
+description = "Designs sequences that should fold into a given backbone."
+
+[requirements]
+gpu = "recommended"
+vram_gb = 8
+runtime = "python"
+weights = "auto"
+needs_binaries = ["python3"]
+notes = "Set the provider's weights directory to your ProteinMPNN checkout."
+
+[inputs]
+backbone = { type = "file", required = true, extensions = ["pdb", "cif"], label = "Backbone structure" }
+num_sequences = { type = "int", default = 8, min = 1, max = 128, label = "Sequences per design" }
+sampling_temp = { type = "float", default = 0.1, min = 0.0001, max = 1.0, label = "Sampling temperature" }
+
+[outputs]
+# Sequences, not coordinates: `structure` would hand a FASTA file to the structure reader.
+designs = { type = "any", pattern = "seqs/*.fa", primary = true }
+scores = { type = "csv", pattern = "*.csv" }
+
+[[run]]
+label = "design"
+command = """
+python3 {{provider.weights_dir}}/protein_mpnn_run.py \
+  --pdb_path {{input.backbone.path}} \
+  --out_folder {{job.workdir}} \
+  --num_seq_per_target {{input.num_sequences}} \
+  --sampling_temp {{input.sampling_temp}} \
+  --seed 37 \
+  --batch_size 1
+"""
