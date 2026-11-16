@@ -24,6 +24,7 @@ import {
   type StructureInfo,
   type StructureMap,
   type Feature,
+  featureSpans,
   type SelectWhere,
   type ContactKind,
   type SceneRequest,
@@ -110,6 +111,10 @@ export interface ViewerScreenHandle {
   openPath: (path: string) => Promise<void>;
   /** Opens a world: its graph becomes the one on screen, at the camera it was left at. */
   openWorld: (id: string) => Promise<void>;
+  /** Keeps the screen dark until `assemble`, while a world loads. */
+  hold: () => void;
+  /** Plays the screen coming together: the viewport first, then each panel over it. */
+  assemble: () => void;
   dispose: () => void;
 }
 
@@ -157,7 +162,10 @@ export function viewerScreen(onBack: () => void): ViewerScreenHandle {
     },
   ];
 
-  const MODES: { id: "structure" | "graph"; label: string; about: string }[] = [
+  // Glass was a third mode here; it is a representation now ("Show > Glass"), so it can be
+  // given to one molecule, one chain or a few residues, and is coloured as they are.
+  type ViewMode = "structure" | "graph";
+  const MODES: { id: ViewMode; label: string; about: string }[] = [
     { id: "structure", label: "Structure", about: "The molecule as it is styled" },
     { id: "graph", label: "Graph", about: "Each chemical component a sphere, over a ghost of the structure" },
   ];
@@ -581,6 +589,48 @@ export function viewerScreen(onBack: () => void): ViewerScreenHandle {
     statusBar(),
   );
 
+  // Floating panels: the viewport is the whole screen and the panels stand over it, as a
+  // game's HUD does, instead of beside it in columns. On trial, and remembered; the Layout
+  // menu turns it off.
+  let floating = true;
+  try {
+    floating = localStorage.getItem("geis.viewer.floating") !== "0";
+  } catch {
+    /* the default */
+  }
+  element.classList.toggle("floating", floating);
+  function setFloating(on: boolean): void {
+    floating = on;
+    element.classList.toggle("floating", on);
+    try {
+      localStorage.setItem("geis.viewer.floating", on ? "1" : "0");
+    } catch {
+      /* not remembered */
+    }
+  }
+
+  /**
+   * The screen coming together as a world is entered: the viewport comes up first, then the
+   * bar, the panels and the status line open over it one after another - each a bright
+   * line drawn across and widening into the panel. Restarted on every entry.
+   */
+  let assembling: number | null = null;
+  function hold(): void {
+    element.classList.add("holding");
+  }
+  function assemble(): void {
+    element.classList.remove("holding");
+    element.classList.remove("assembling");
+    // Read back, so the class going on again restarts the animations.
+    void element.offsetWidth;
+    element.classList.add("assembling");
+    if (assembling !== null) window.clearTimeout(assembling);
+    assembling = window.setTimeout(() => {
+      assembling = null;
+      element.classList.remove("assembling");
+    }, 1800);
+  }
+
   drawLevelBar();
   drawActivity();
   void api.layoutLoad().then((saved) => {
@@ -655,6 +705,11 @@ export function viewerScreen(onBack: () => void): ViewerScreenHandle {
       { kind: "title", label: "Arrange" },
       { kind: "item", label: "3D viewport only", onPick: () => commit(defaultDesk()) },
       { kind: "item", label: "3D viewport, sequence and node graph", onPick: () => commit(workDesk()) },
+      {
+        kind: "item",
+        label: floating ? "Panels beside the viewport" : "Panels floating over the viewport",
+        onPick: () => setFloating(!floating),
+      },
       { kind: "separator" },
       { kind: "title", label: "Add a pane" },
       ...newTabEntries((kind) => commit(addPane(desk, kind))),
@@ -1540,7 +1595,7 @@ export function viewerScreen(onBack: () => void): ViewerScreenHandle {
               title: `${mode.label}: ${mode.about}. Press V over the viewport for the View chain.`,
               onclick: (event: Event) => {
                 event.stopPropagation();
-                setGraphMode(mode.id === "graph");
+                setMode(mode.id);
               },
             },
             el("span", { class: `mode-glyph ${mode.id}` }),
@@ -1865,7 +1920,19 @@ export function viewerScreen(onBack: () => void): ViewerScreenHandle {
       editor.setHoverDetail("That selection has no polymer residues to style.");
       return;
     }
-    molecule.features = [...(molecule.features ?? []), ...runs.map((run) => ({ ...run, ...feature }))];
+    // One feature per chain, carrying all its runs: a selection scattered over a capsid -
+    // its hydrophobic core, say - is a hundred thousand runs, and one feature for each was
+    // most of what the world weighed.
+    const byChain = new Map<string, { from: number; to: number }[]>();
+    for (const run of runs) byChain.set(run.chain, [...(byChain.get(run.chain) ?? []), run]);
+    const added: Feature[] = [...byChain].map(([chain, spans]) => ({
+      chain,
+      from: spans[0].from,
+      to: spans[spans.length - 1].to,
+      ...(spans.length > 1 ? { ranges: spans.map((span) => (span.from === span.to ? `${span.from}` : `${span.from}-${span.to}`)).join(",") } : {}),
+      ...feature,
+    }));
+    molecule.features = [...(molecule.features ?? []), ...added];
     editor.setHoverDetail(`${what} - ${target.label}.`);
     await commitGraph();
   }
@@ -1999,6 +2066,7 @@ export function viewerScreen(onBack: () => void): ViewerScreenHandle {
     { label: "Spacefill", representations: ["spacefill"] },
     { label: "Backbone", representations: ["backbone"] },
     { label: "Cartoon + sticks", representations: ["cartoon", "sticks"] },
+    { label: "Cartoon in glass", representations: ["cartoon", "glass"] },
   ];
   const COLOUR_BY: { label: string; scheme: ColorScheme }[] = [
     { label: "Chain", scheme: "chain" },
@@ -2091,6 +2159,7 @@ export function viewerScreen(onBack: () => void): ViewerScreenHandle {
       ["ball-and-stick", "Ball and stick"],
       ["spacefill", "Spacefill"],
       ["backbone", "Backbone"],
+      ["glass", "Glass"],
     ];
     const drawn = (representation: Representation) => !onResidues && shared.representations !== null && shared.representations.split("+").includes(representation);
     // PyMOL's three verbs: `show` adds a representation, `hide` takes one away, `as`
@@ -2210,7 +2279,7 @@ export function viewerScreen(onBack: () => void): ViewerScreenHandle {
           label: "Mode",
           next: () => ({
             title: "Mode",
-            items: MODES.map((mode) => ({ label: mode.label, glyph: mode.id, current: mode.id === modeNow().id, pick: () => setGraphMode(mode.id === "graph") })),
+            items: MODES.map((mode) => ({ label: mode.label, glyph: mode.id, current: mode.id === modeNow().id, pick: () => setMode(mode.id) })),
           }),
         },
         {
@@ -2603,6 +2672,13 @@ export function viewerScreen(onBack: () => void): ViewerScreenHandle {
       const hit = (feature: Feature) => runs.some((run) => run.chain === feature.chain && run.from <= feature.to && feature.from <= run.to);
       for (const node of moleculeNodes().filter((candidate) => candidate === owner)) {
         node.features = (node.features ?? [])
+          // A feature of several ranges is taken apart first, so only the ranges the
+          // selection reaches lose the representation.
+          .flatMap((feature) =>
+            feature.ranges && hit(feature)
+              ? featureSpans(feature).map(([from, to]) => ({ ...feature, from, to, ranges: undefined }))
+              : [feature],
+          )
           .map((feature) => (hit(feature) && feature.show ? { ...feature, show: feature.show.filter((entry) => entry !== representation) } : feature))
           .filter((feature) => (feature.show?.length ?? 0) > 0 || feature.hide || feature.colour);
       }
@@ -2627,6 +2703,8 @@ export function viewerScreen(onBack: () => void): ViewerScreenHandle {
     "hide.ball-and-stick": () => hideOnly("ball-and-stick", "Ball and stick"),
     "show.spacefill": () => showAlso("spacefill", "Spacefill"),
     "hide.spacefill": () => hideOnly("spacefill", "Spacefill"),
+    "show.glass": () => showAlso("glass", "Glass"),
+    "hide.glass": () => hideOnly("glass", "Glass"),
     "as.cartoon": () => showAs(["cartoon"], "cartoon"),
     "as.sticks": () => showAs(["sticks"], "sticks"),
     hide: () =>
@@ -2772,6 +2850,7 @@ export function viewerScreen(onBack: () => void): ViewerScreenHandle {
     ["ball-and-stick", "Ball and stick"],
     ["spacefill", "Spacefill"],
     ["backbone", "Backbone"],
+    ["glass", "Glass"],
   ];
   const SCENE_SCHEMES: [ColorScheme, string][] = [
     ["chain", "chain"],
@@ -3252,6 +3331,12 @@ export function viewerScreen(onBack: () => void): ViewerScreenHandle {
     if (target?.closest(".node-menu, .mode-menu") || stage.contains(target)) return;
     viewportMenu.close();
   }, true);
+
+  /** Into one of the viewport's modes; the others are left. */
+  function setMode(mode: ViewMode): void {
+    if ((mode === "graph") !== graphMode) setGraphMode(mode === "graph");
+    drawModeHeader();
+  }
 
   function setGraphMode(on: boolean): void {
     graphMode = on;
@@ -5105,6 +5190,15 @@ export function viewerScreen(onBack: () => void): ViewerScreenHandle {
     if (args.heteroatoms_by_element !== undefined) {
       next.heteroatoms_by_element = flag("heteroatoms_by_element", args.heteroatoms_by_element);
     }
+    if (args.glass_colour !== undefined) {
+      if (args.glass_colour === null) {
+        next.glass = null;
+      } else {
+        const hex = typeof args.glass_colour === "string" ? normalizeHex(args.glass_colour) : null;
+        if (!hex) throw new Error(`glass_colour must be a hex colour such as #6fa8ff, or null - not ${JSON.stringify(args.glass_colour)}`);
+        next.glass = hexToUnit(hex);
+      }
+    }
     return next;
   }
 
@@ -5914,6 +6008,8 @@ export function viewerScreen(onBack: () => void): ViewerScreenHandle {
     element,
     openPath,
     openWorld,
+    hold,
+    assemble,
     dispose() {
       window.clearInterval(viewWatch);
       void stopDrops.then((stop) => stop?.());

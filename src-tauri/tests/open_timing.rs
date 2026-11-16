@@ -81,3 +81,29 @@ fn opening_a_capsid_stage_by_stage() {
         eprintln!("  {} MB", bytes.len() >> 20);
     }
 }
+
+#[test]
+fn envelopes_of_a_protein_and_of_a_capsid() {
+    let Some(dir) = std::env::var("GEIS_TEST_STRUCTURES")
+        .ok()
+        .map(PathBuf::from)
+    else {
+        return;
+    };
+    for (id, unit) in [("4hhb", Unit::Deposited), ("1uf2", Unit::Assembly)] {
+        let path = dir.join(format!("{id}.cif"));
+        if !path.exists() {
+            continue;
+        }
+        let s = structure::load_file_as(&path, unit).unwrap();
+        let envelope = stage(&format!("envelope {id}"), || {
+            let atoms: Vec<usize> = (0..s.atom_count()).collect();
+            geis_lib::geometry::envelope::envelope_of(&s, &atoms, &|_| [0.8; 3])
+        });
+        eprintln!(
+            "  {} vertices, {} triangles",
+            envelope.positions.len() / 3,
+            envelope.indices.len() / 3
+        );
+    }
+}

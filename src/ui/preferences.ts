@@ -25,6 +25,7 @@ const SHOW_AS: [string, Representation[]][] = [
   ["Ball and stick", ["ball-and-stick"]],
   ["Spacefill", ["spacefill"]],
   ["Backbone", ["backbone"]],
+  ["Cartoon in glass", ["cartoon", "glass"]],
 ];
 
 const ELEMENT_TABLES: { id: string; name: string; about: string; colors: string[] }[] = [

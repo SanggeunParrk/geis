@@ -269,7 +269,10 @@ fn sort_into_grid(points: &[[f32; 3]], cell: f32) -> Option<Sorted> {
     let dims = loop {
         let dims = [0, 1, 2]
             .map(|axis| (((high[axis] - low[axis]) / cell).floor() as u32).saturating_add(1));
-        let cells = dims.iter().map(|&d| u64::from(d)).product::<u64>();
+        // Saturating: three sides near u32::MAX - coordinates of 1e38 - overflow a u64.
+        let cells = dims
+            .iter()
+            .fold(1u64, |cells, &d| cells.saturating_mul(u64::from(d)));
         if cells <= 16_000_000 {
             break dims;
         }

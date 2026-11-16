@@ -881,7 +881,7 @@ pub async fn build_scene(
 
 /// Legend rows for a colour scheme, so the swatches beside the viewport are the same
 /// colours the geometry was built with.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn scene_legend(
     state: State<'_, AppState>,
     structure_id: String,
@@ -1011,7 +1011,7 @@ pub struct NodeTemplate {
 }
 
 /// The graph a new session starts with.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn graph_load(state: State<'_, AppState>) -> crate::graph::Graph {
     // The graph belongs to the world that is open; the settings row below is what sessions
     // from before worlds existed left behind, and `all_worlds` moves it into the first one.
@@ -1069,7 +1069,7 @@ pub fn layout_save(state: State<'_, AppState>, layout: String) -> Reply<()> {
 ///
 /// Called on every change rather than on quit: a crash or a force-quit is exactly when
 /// losing an afternoon's pipeline hurts, and the whole graph is a few kilobytes of JSON.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn graph_save(state: State<'_, AppState>, graph: crate::graph::Graph) -> Reply<()> {
     // Into the world that is open, which is what a session is.
     let mut worlds = all_worlds(&state);
@@ -1139,6 +1139,20 @@ pub struct SelectionMask {
     pub residues: Vec<u8>,
 }
 
+impl SelectionMask {
+    /// As bytes rather than JSON: two little-endian `u32` counts, then the atoms' bytes,
+    /// then the residues'. A capsid's mask is three and a half million atoms, and as a
+    /// JSON array of numbers that was seven megabytes to write and parse on every hover.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(8 + self.atoms.len() + self.residues.len());
+        bytes.extend_from_slice(&(self.atoms.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(self.residues.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&self.atoms);
+        bytes.extend_from_slice(&self.residues);
+        bytes
+    }
+}
+
 /// What the viewport was pointing at: enough to name it, at every level.
 #[derive(Debug, Clone, Serialize)]
 pub struct PickTarget {
@@ -1163,7 +1177,9 @@ pub struct PickTarget {
 /// the structure, which lives here. Written to answer all three levels at once, because
 /// the plan is to pick residues and atoms as well as chains and the difference is which
 /// field the caller reads, not another round trip.
-#[tauri::command]
+// Off the main thread: on a capsid this is millions of atoms, and a command that runs
+// there holds up the window's drawing while it does.
+#[tauri::command(async)]
 pub fn pick_target(
     state: State<'_, AppState>,
     id: String,
@@ -1249,11 +1265,23 @@ fn all_worlds(state: &AppState) -> Vec<crate::worlds::World> {
         worlds.push(world);
         let _ = write_worlds(state, &worlds);
     }
+    // A shelf saved before features were compacted is compacted once, and kept so.
+    let mut shrank = false;
+    for world in &mut worlds {
+        shrank |= world.graph.compact_features();
+    }
+    if shrank {
+        let _ = write_worlds(state, &worlds);
+    }
     worlds
 }
 
 fn write_worlds(state: &AppState, worlds: &[crate::worlds::World]) -> Result<(), String> {
-    let text = serde_json::to_string(worlds).map_err(describe)?;
+    let mut worlds = worlds.to_vec();
+    for world in &mut worlds {
+        world.graph.compact_features();
+    }
+    let text = serde_json::to_string(&worlds).map_err(describe)?;
     state
         .store
         .set_setting(crate::worlds::SETTING, &text)
@@ -1284,7 +1312,7 @@ fn active_world_id(state: &AppState, worlds: &[crate::worlds::World]) -> String 
 /// jumped to the front and its neighbours have moved - and the row is a place you learn,
 /// like a rack of records. It also means leaving a world changes nothing about the row, so
 /// the shelf does not have to build itself again to show the same thing.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn worlds_list(state: State<'_, AppState>) -> Vec<crate::worlds::WorldCard> {
     let mut worlds = all_worlds(&state);
     worlds.sort_by_key(|world| world.created);
@@ -1377,7 +1405,7 @@ pub fn world_layout(state: State<'_, AppState>, id: String) -> Reply<Option<Stri
 
 /// Finds contacts of one kind in a structure, or around some of its residues: hydrogen
 /// bonds, salt bridges, pi stacking, hydrophobic contacts.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn find_contacts(
     state: State<'_, AppState>,
     id: String,
@@ -1395,7 +1423,7 @@ pub fn find_contacts(
 }
 
 /// The residues of a structure's hydrophobic core, by index.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn find_core(state: State<'_, AppState>, id: String) -> Reply<Vec<u32>> {
     let structure = lookup(&state, &id)?;
     Ok(crate::structure::contacts::hydrophobic_core(&structure))
@@ -1834,7 +1862,7 @@ pub fn world_chat_save(
 }
 
 /// Opens a world: it becomes the one the viewer reads and writes.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn world_open(state: State<'_, AppState>, id: String) -> Reply<crate::worlds::World> {
     let mut worlds = all_worlds(&state);
     let world = worlds
@@ -1852,7 +1880,7 @@ pub fn world_open(state: State<'_, AppState>, id: String) -> Reply<crate::worlds
 }
 
 /// One world, graph and camera, for the shelf's preview.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn world_read(state: State<'_, AppState>, id: String) -> Reply<crate::worlds::World> {
     all_worlds(&state)
         .into_iter()
@@ -2492,7 +2520,7 @@ pub async fn engine_stop(
 // `structure::index`.
 
 /// Evaluates a selection spec against a structure.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn select_view(
     state: State<'_, AppState>,
     id: String,
@@ -2504,16 +2532,20 @@ pub fn select_view(
 }
 
 /// The viewport's two masks for a view.
-#[tauri::command]
+// Off the main thread: on a capsid this is millions of atoms, and a command that runs
+// there holds up the window's drawing while it does.
+#[tauri::command(async)]
 pub fn view_mask(
     state: State<'_, AppState>,
     id: String,
     view: crate::structure::index::View,
-) -> Reply<SelectionMask> {
+) -> Reply<tauri::ipc::Response> {
     let structure = lookup(&state, &id)?;
     let table = crate::structure::index::IndexTable::from_structure(&structure);
     let (atoms, residues) = crate::structure::index::masks(&view.bounded(&table), &table);
-    Ok(SelectionMask { atoms, residues })
+    Ok(tauri::ipc::Response::new(
+        SelectionMask { atoms, residues }.encode(),
+    ))
 }
 
 /// What a view amounts to, for the card: how many of each level, and a name.
@@ -2533,7 +2565,9 @@ pub struct ViewSummary {
     pub residue_indices: Vec<u32>,
 }
 
-#[tauri::command]
+// Off the main thread: on a capsid this is millions of atoms, and a command that runs
+// there holds up the window's drawing while it does.
+#[tauri::command(async)]
 pub fn describe_view(
     state: State<'_, AppState>,
     id: String,
@@ -2864,7 +2898,7 @@ pub struct ResidueRow {
 
 /// The residues of one chain, in the structure's order - not a range, since a chain's
 /// residues are interleaved with other chains' in a deposition.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn chain_residues(
     state: State<'_, AppState>,
     id: String,
@@ -2924,7 +2958,7 @@ pub struct ResidueAtoms {
     pub bonds: Vec<[u32; 2]>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn residue_atoms(state: State<'_, AppState>, id: String, residue: u32) -> Reply<ResidueAtoms> {
     let structure = lookup(&state, &id)?;
     let Some(target) = structure.residues.get(residue as usize) else {
@@ -2971,7 +3005,9 @@ pub fn residue_atoms(state: State<'_, AppState>, id: String, residue: u32) -> Re
 ///
 /// An empty `chains` selects the whole structure, which is what selecting the molecule
 /// rather than one of its chains means.
-#[tauri::command]
+// Off the main thread: on a capsid this is millions of atoms, and a command that runs
+// there holds up the window's drawing while it does.
+#[tauri::command(async)]
 pub fn selection_mask(
     state: State<'_, AppState>,
     id: String,
@@ -2979,15 +3015,10 @@ pub fn selection_mask(
     residue: Option<u32>,
     atom: Option<u32>,
     residues: Option<Vec<u32>>,
-) -> Reply<SelectionMask> {
+) -> Reply<tauri::ipc::Response> {
     let structure = lookup(&state, &id)?;
-    Ok(mask_for(
-        &structure,
-        &chains,
-        residue,
-        atom,
-        residues.as_deref(),
-    ))
+    let mask = mask_for(&structure, &chains, residue, atom, residues.as_deref());
+    Ok(tauri::ipc::Response::new(mask.encode()))
 }
 
 /// The mask itself, apart from the command so it can be tested without an app.
@@ -3174,11 +3205,15 @@ mod mask_tests {
         let range = mask_for(&structure, &[], None, None, Some(&[0, 2]));
         assert_eq!(range.residues, vec![1, 0, 1]);
         assert_eq!(range.atoms, vec![1, 1, 0, 0, 1, 1]);
+        // As it crosses to the window: two counts, then the bytes.
+        let bytes = range.encode();
+        assert_eq!(&bytes[..8], &[6, 0, 0, 0, 3, 0, 0, 0]);
+        assert_eq!(&bytes[8..], &[1, 1, 0, 0, 1, 1, 1, 0, 1]);
     }
 }
 
 /// The sequences of an open structure, for the sequence strip.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn structure_sequence(state: State<'_, AppState>, id: String) -> Reply<Vec<ChainSequence>> {
     use crate::structure::model::SecondaryStructure;
     let structure = lookup(&state, &id)?;

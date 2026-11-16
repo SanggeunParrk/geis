@@ -97,7 +97,7 @@ export function layMask(
   // a typed array's `set` past its end throws instead of drawing what does fit.
   const lay = (into: Uint8Array, from: ArrayLike<number>, offset: number, count: number) => {
     if (!(offset >= 0) || offset >= into.length) return;
-    into.set(Uint8Array.from(from).subarray(0, Math.min(count, into.length - offset)), offset);
+    into.set((from instanceof Uint8Array ? from : Uint8Array.from(from)).subarray(0, Math.min(count, into.length - offset)), offset);
   };
   lay(atoms, mask.atoms, part.atom_offset, part.atom_count);
   lay(residues, mask.residues, part.residue_offset, part.residue_count);

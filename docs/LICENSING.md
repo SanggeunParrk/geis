@@ -20,8 +20,10 @@ Checked before release (2026-11-16):
   redistributed - the app only ever points at where a user gets them), Blender, llama.cpp
   (fetched on request, MIT), and the checkouts in `vendor/` (StructCooker, BioMol: MIT;
   kept out of the repository by `.gitignore`).
-- **Artwork.** The app icon and the cell backdrops are Sanggeun Park's own (the backdrops
-  are rendered by `scripts/blender/cell_scene.py`, from nothing but primitives and noise).
+- **Artwork.** The app icon is Sanggeun Park's own. The cell behind the opening screens is
+  drawn live from `src/assets/cell/molecules.json`, made from PDB entries and the
+  Chemical Component Dictionary's ideal coordinates for its small molecules (both CC0) by
+  `src-tauri/examples/cell_assets.rs`.
 
 The earlier posture, recorded below, was academic / non-commercial; the findings still
 say what each upstream project allows.
@@ -96,11 +98,11 @@ immediate-mode GL do not fit multi-world state plus a job pipeline.
 
 ## Blender coupling
 Blender treats anything using the `bpy` API as a GPL derivative (this is exactly why
-Molecular Nodes moved MIT -> GPLv3 - the Blender extensions platform requires it). Two
-files here use `bpy`: `src-tauri/assets/render_scene.py` and
-`scripts/blender/cell_scene.py`. They are MIT, which is GPL-compatible: run inside Blender
-the combination is GPL, as Blender's own position requires, and nothing in Geis links
-Blender. If a stricter reading is ever wanted, those two files can be relicensed
+Molecular Nodes moved MIT -> GPLv3 - the Blender extensions platform requires it). The
+files here that use `bpy` - `src-tauri/assets/render_scene.py`, and the icon's
+`scripts/blender/icon.py` - are MIT, which is GPL-compatible: run inside Blender the
+combination is GPL, as Blender's own position requires, and nothing in Geis links
+Blender. If a stricter reading is ever wanted, those files can be relicensed
 GPL-3.0-or-later on their own without touching the rest.
 
 - **Chosen:** run Blender headless as a separate process (`blender -b -P script.py`).

@@ -161,6 +161,35 @@ fn point_profile(point: &TracePoint) -> (f32, f32) {
     }
 }
 
+/// The cross-section at `t` of the way from residue `index` to the next: each residue's
+/// own profile weighted by the uniform cubic B-spline's basis over the residues either
+/// side, so the breadth changes over two residues rather than one and with no corner.
+/// Where the run ends the end residue stands in for the missing neighbours.
+fn blended_profile(trace: &[TracePoint], index: usize, t: f32) -> (f32, f32) {
+    let last = trace.len() - 1;
+    let u = 1.0 - t;
+    let weights = [
+        u * u * u / 6.0,
+        (3.0 * t * t * t - 6.0 * t * t + 4.0) / 6.0,
+        (-3.0 * t * t * t + 3.0 * t * t + 3.0 * t + 1.0) / 6.0,
+        t * t * t / 6.0,
+    ];
+    let around = [
+        index.saturating_sub(1),
+        index,
+        (index + 1).min(last),
+        (index + 2).min(last),
+    ];
+    let mut width = 0.0;
+    let mut height = 0.0;
+    for (weight, at) in weights.iter().zip(around) {
+        let (w, h) = point_profile(&trace[at]);
+        width += weight * w;
+        height += weight * h;
+    }
+    (width, height)
+}
+
 /// One point on the cross-section outline: where it is and which way it faces, both in the
 /// (side, up) basis.
 #[derive(Debug, Clone, Copy)]
@@ -764,6 +793,47 @@ fn fit_helix_axes(trace: &[TracePoint]) -> Vec<Option<HelixAxis>> {
             direction,
         });
     }
+    // Smoothed along the run, (1, 2, 1) over neighbours on the same helix, and each centre
+    // slid back level with its own alpha carbon. A four-residue window's axis wobbles
+    // with the helix's irregularities - a degree here, a tenth of an angstrom there - and
+    // the path built about it carried every wobble as a bend.
+    let raw = axes.clone();
+    for index in 0..trace.len() {
+        let Some(here) = raw[index] else { continue };
+        let mut centre = scaled(here.centre, 2.0);
+        let mut direction = scaled(here.direction, 2.0);
+        let mut weight = 2.0;
+        for neighbour in [index.wrapping_sub(1), index + 1] {
+            let Some(Some(other)) = raw.get(neighbour) else {
+                continue;
+            };
+            if dot(other.direction, here.direction) < 0.9 {
+                continue;
+            }
+            centre = [
+                centre[0] + other.centre[0],
+                centre[1] + other.centre[1],
+                centre[2] + other.centre[2],
+            ];
+            direction = [
+                direction[0] + other.direction[0],
+                direction[1] + other.direction[1],
+                direction[2] + other.direction[2],
+            ];
+            weight += 1.0;
+        }
+        let centre = scaled(centre, 1.0 / weight);
+        let direction = normalize(direction);
+        let along = dot(sub(trace[index].position, centre), direction);
+        axes[index] = Some(HelixAxis {
+            centre: [
+                centre[0] + direction[0] * along,
+                centre[1] + direction[1] * along,
+                centre[2] + direction[2] * along,
+            ],
+            direction,
+        });
+    }
     axes
 }
 
@@ -831,6 +901,13 @@ fn helix_point(
         angle = -angle;
     }
 
+    // And the step has to look like a helix's: about a hundred degrees round an axis about
+    // two and a quarter angstroms out. A residue that has left the helix - the last one,
+    // pulled off towards the loop - can sit an angstrom from the axis a hundred and fifty
+    // degrees on, and turning the path about that bent it sixty degrees in a step.
+    if !(50.0..=135.0).contains(&angle.abs().to_degrees()) || from_len.min(to_len) < 1.6 {
+        return None;
+    }
     let centre = mix(from.centre, to.centre, t);
     let radius = from_len + (to_len - from_len) * t;
     let spun = rotate_about(unit_from, axis, angle * t);
@@ -962,6 +1039,68 @@ fn add_segment(
     }
     let mut samples: Vec<Sample> = Vec::with_capacity(trace.len() * detail.subdivisions);
 
+    // Which stretches between residues are drawn as a helix: both ends on a fitted axis,
+    // and the two axes agreeing (`helix_point` answers `None` at a kink).
+    let helical: Vec<bool> = (0..trace.len() - 1)
+        .map(|index| match (axes[index], axes[index + 1]) {
+            (Some(from), Some(to)) => helix_point(
+                from,
+                to,
+                trace[index].position,
+                trace[index + 1].position,
+                0.5,
+            )
+            .is_some(),
+            _ => false,
+        })
+        .collect();
+    // A point on the path. Inside a helix the path is generated as a helix - centre
+    // sliding along the axis, radius rotating about it - because a spline through alpha
+    // carbons at 100 degrees a residue is 3.6 points per turn and reads as a rounded
+    // triangle. Everywhere else the spline is right.
+    //
+    // Where the two meet - a helix's first and last stretch, and either side of a kink in
+    // its axis - the helix is eased in from the spline and back out to it. Both pass
+    // through the alpha carbon there, but in different directions, and switching from one
+    // to the other bent the ribbon by up to eighty degrees at a single alpha carbon:
+    // the kinks at every helix end. Weighted by a smoothstep, whose slope is zero at the
+    // join, the path leaves the join along the spline's own direction.
+    let point_at = |index: usize, at: f32| -> [f32; 3] {
+        let spline = catmull_rom(
+            controls[index.saturating_sub(1)],
+            controls[index],
+            controls[index + 1],
+            controls[(index + 2).min(trace.len() - 1)],
+            at,
+        );
+        if !helical[index] {
+            return spline;
+        }
+        let (Some(from), Some(to)) = (axes[index], axes[index + 1]) else {
+            return spline;
+        };
+        let Some(helix) = helix_point(
+            from,
+            to,
+            trace[index].position,
+            trace[index + 1].position,
+            at,
+        ) else {
+            return spline;
+        };
+        let starts = index == 0 || !helical[index - 1];
+        let ends = index + 2 >= trace.len() || !helical[index + 1];
+        let clamped = at.clamp(0.0, 1.0);
+        let mut weight = 1.0f32;
+        if starts {
+            weight = weight.min(smoothstep(clamped));
+        }
+        if ends {
+            weight = weight.min(smoothstep(1.0 - clamped));
+        }
+        mix(spline, helix, weight)
+    };
+
     for index in 0..trace.len() - 1 {
         let per = if axes[index].is_some() && axes[index + 1].is_some() {
             detail.helix_subdivisions
@@ -975,49 +1114,16 @@ fn add_segment(
         };
         for step in 0..steps {
             let t = step as f32 / per as f32;
-            let spline = |at: f32| {
-                catmull_rom(
-                    controls[index.saturating_sub(1)],
-                    controls[index],
-                    controls[index + 1],
-                    controls[(index + 2).min(trace.len() - 1)],
-                    at,
-                )
-            };
-            // Inside a helix the path is generated as a helix - centre sliding along the
-            // axis, radius rotating about it - because a spline through alpha carbons at
-            // 100 degrees a residue is 3.6 points per turn and reads as a rounded
-            // triangle. Everywhere else the spline is right.
-            let helical = match (axes[index], axes[index + 1]) {
-                (Some(from), Some(to)) => helix_point(
-                    from,
-                    to,
-                    trace[index].position,
-                    trace[index + 1].position,
-                    t,
-                ),
-                _ => None,
-            };
-            let point = helical.unwrap_or_else(|| spline(t));
+            let point = point_at(index, t);
 
-            // From the spline, not from the residues. Mol*'s `interpolatePointsAndTangents`
+            // From the curve, not from the residues. Mol*'s `interpolatePointsAndTangents`
             // evaluates the curve at t plus and minus a hundredth and differences them,
             // and that is the difference between a cross-section perpendicular to the
             // path and one merely near it: blending the per-residue tangents linearly
             // leaves the ribbon tilted against its own curve, which reads as a kink at
             // every residue.
             const EPS: f32 = 0.01;
-            let sample = |at: f32| match (axes[index], axes[index + 1]) {
-                (Some(from), Some(to)) => helix_point(
-                    from,
-                    to,
-                    trace[index].position,
-                    trace[index + 1].position,
-                    at,
-                )
-                .unwrap_or_else(|| spline(at)),
-                _ => spline(at),
-            };
+            let sample = |at: f32| point_at(index, at);
             let step = sub(sample(t + EPS), sample(t - EPS));
             let tangent = if length(step) > 1e-6 {
                 normalize(step)
@@ -1030,11 +1136,13 @@ fn add_segment(
             // slowest in the middle, and the ribbon shows a crease at every boundary.
             let side = slerp(frames[index].side, frames[index + 1].side, t);
 
-            // Blending the profile across the join is what removes the step at the end of
-            // a helix; a hard switch leaves a visible cliff in the ribbon.
-            let (width_a, height_a) = point_profile(&trace[index]);
-            let (width_b, height_b) = point_profile(&trace[index + 1]);
-            let blend = smoothstep(t);
+            // The profile is blended over four residues, by the cubic B-spline's weights,
+            // not over the one stretch between two. Blended over one, a helix went from its
+            // full breadth to a thread in 3.8 A, after the path had already left the helix:
+            // every helix ended in a broad flat flag standing out from the coil. Spread
+            // this way the ribbon starts narrowing at the helix's last residue and is a
+            // thread a residue later, and its edge has no corner at either end.
+            let (width, height) = blended_profile(trace, index, t);
             let residue = if t < 0.5 {
                 trace[index].residue
             } else {
@@ -1044,8 +1152,8 @@ fn add_segment(
                 point,
                 tangent,
                 side,
-                width: width_a + (width_b - width_a) * blend,
-                height: height_a + (height_b - height_a) * blend,
+                width,
+                height,
                 residue,
             });
         }
@@ -1064,6 +1172,16 @@ fn add_segment(
             ];
         }
     }
+
+    #[cfg(test)]
+    PATHS.with(|paths| {
+        paths.borrow_mut().push(
+            samples
+                .iter()
+                .map(|sample| (sample.point, sample.residue))
+                .collect(),
+        )
+    });
 
     let first_vertex = mesh.vertex_count() as u32;
     let mut rings = 0usize;
@@ -1264,6 +1382,16 @@ fn perpendicular(v: Vec3) -> Vec3 {
         [1.0, 0.0, 0.0]
     };
     normalize(cross(helper, v))
+}
+
+/// A sampled path: each sample's point and residue.
+#[cfg(test)]
+type SampledPath = Vec<([f32; 3], u32)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Every sampled path built on this thread, for the tests that measure the curve.
+    static PATHS: std::cell::RefCell<Vec<SampledPath>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
@@ -2116,5 +2244,61 @@ mod tests {
             highest > 7.0,
             "the base is drawn where the ring is, not just the tube: {highest}"
         );
+    }
+
+    /// Prints the sharpest bends along real structures' ribbons. Run by hand:
+    /// `cargo test --release kinks -- --ignored --nocapture` with GEIS_KINK_FILES set.
+    #[test]
+    #[ignore]
+    fn kinks() {
+        let files = std::env::var("GEIS_KINK_FILES").unwrap_or_default();
+        for file in files.split(',').filter(|f| !f.is_empty()) {
+            let structure = crate::structure::load_file(std::path::Path::new(file)).unwrap();
+            super::PATHS.with(|paths| paths.borrow_mut().clear());
+            let colors = vec![[1.0, 1.0, 1.0]; structure.atom_count()];
+            let mut mesh = Mesh::default();
+            build(&structure, &colors, &mut mesh, None, false);
+            let mut bends: Vec<(f32, u32)> = Vec::new();
+            super::PATHS.with(|paths| {
+                for path in paths.borrow().iter() {
+                    for w in path.windows(3) {
+                        let a = sub(w[1].0, w[0].0);
+                        let b = sub(w[2].0, w[1].0);
+                        if length(a) < 1e-4 || length(b) < 1e-4 {
+                            continue;
+                        }
+                        let angle = dot(normalize(a), normalize(b))
+                            .clamp(-1.0, 1.0)
+                            .acos()
+                            .to_degrees();
+                        bends.push((angle, w[1].1));
+                    }
+                }
+            });
+            bends.sort_by(|x, y| y.0.total_cmp(&x.0));
+            let over = |limit: f32| bends.iter().filter(|b| b.0 > limit).count();
+            println!(
+                "{file}: {} samples, >30deg {}, >45deg {}, >60deg {}",
+                bends.len(),
+                over(30.0),
+                over(45.0),
+                over(60.0)
+            );
+            for (angle, residue) in bends.iter().take(12) {
+                let r = &structure.residues[*residue as usize];
+                let prev = structure
+                    .residues
+                    .get((*residue as usize).wrapping_sub(1))
+                    .map(|p| format!("{:?}", p.secondary));
+                let next = structure
+                    .residues
+                    .get(*residue as usize + 1)
+                    .map(|p| format!("{:?}", p.secondary));
+                println!(
+                    "  {angle:5.1} deg at residue {} {:?} (prev {prev:?}, next {next:?})",
+                    r.number, r.secondary
+                );
+            }
+        }
     }
 }

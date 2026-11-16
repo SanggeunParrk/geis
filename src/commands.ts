@@ -22,6 +22,8 @@ export const COMMANDS: CommandInfo[] = [
   { id: "hide.ball-and-stick", label: "Hide ball and stick", group: "Show" },
   { id: "show.spacefill", label: "Show spacefill", group: "Show" },
   { id: "hide.spacefill", label: "Hide spacefill", group: "Show" },
+  { id: "show.glass", label: "Show glass", group: "Show" },
+  { id: "hide.glass", label: "Hide glass", group: "Show" },
   { id: "as.cartoon", label: "Show as cartoon only", group: "Show" },
   { id: "as.sticks", label: "Show as sticks only", group: "Show" },
   { id: "hide", label: "Hide everything", group: "Show" },

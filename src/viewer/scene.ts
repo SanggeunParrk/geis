@@ -16,6 +16,8 @@ export interface SceneHeader {
   cylinder_count: number;
   vertex_count: number;
   triangle_count: number;
+  glass_vertex_count: number;
+  glass_triangle_count: number;
   drawn_atoms: number;
   /** The size of the scene's id space, for a mask keyed by atom or residue. */
   atom_count: number;
@@ -41,6 +43,10 @@ export interface SceneHeader {
     mesh_colors: Block;
     mesh_indices: Block;
     mesh_vertex_residue: Block;
+    glass_positions: Block;
+    glass_normals: Block;
+    glass_colors: Block;
+    glass_indices: Block;
   };
 }
 
@@ -64,10 +70,15 @@ export interface Scene {
   meshIndices: Uint32Array;
   /** The residue each vertex belongs to, for a mask keyed by residue. */
   meshVertexResidue: Uint32Array;
+  /** The glass representation's surface: laid out as the mesh is, without residues. */
+  glassPositions: Float32Array;
+  glassNormals: Int8Array;
+  glassColors: Uint8Array;
+  glassIndices: Uint32Array;
 }
 
 /** Must match `GEOMETRY_WIRE_VERSION` in the Rust `geometry::mesh`. */
-const SUPPORTED_VERSION = 2;
+const SUPPORTED_VERSION = 3;
 const MAGIC = 0x4f45474d; // "MGEO" little-endian
 
 export function decodeScene(buffer: ArrayBuffer): Scene {
@@ -124,6 +135,10 @@ export function decodeScene(buffer: ArrayBuffer): Scene {
     meshColors: bytes(blocks.mesh_colors),
     meshIndices: uints(blocks.mesh_indices),
     meshVertexResidue: uints(blocks.mesh_vertex_residue),
+    glassPositions: floats(blocks.glass_positions),
+    glassNormals: signedBytes(blocks.glass_normals),
+    glassColors: bytes(blocks.glass_colors),
+    glassIndices: uints(blocks.glass_indices),
   };
 
   if (scene.sphereInstances.length !== header.sphere_count * 4) {

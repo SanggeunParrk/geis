@@ -205,7 +205,7 @@ pub struct Block {
 
 /// Bumped when the layout changes, so a stale frontend fails loudly rather than reading
 /// one array as another.
-pub const GEOMETRY_WIRE_VERSION: u32 = 2;
+pub const GEOMETRY_WIRE_VERSION: u32 = 3;
 pub const GEOMETRY_WIRE_MAGIC: &[u8; 4] = b"MGEO";
 
 #[derive(Debug, Clone, Serialize)]
@@ -216,6 +216,9 @@ pub struct GeometryHeader {
     pub cylinder_count: u32,
     pub vertex_count: u32,
     pub triangle_count: u32,
+    /// The glass's vertices and triangles (`Scene::glass`).
+    pub glass_vertex_count: u32,
+    pub glass_triangle_count: u32,
     /// Atoms that ended up drawn, which is not the same as the structure's atom count.
     pub drawn_atoms: u32,
     /// Framing information, computed here because it needs every drawn position and
@@ -263,6 +266,14 @@ pub struct GeometryBlocks {
     pub mesh_indices: Block,
     /// u32 per vertex.
     pub mesh_vertex_residue: Block,
+    /// f32 x 3 per glass vertex.
+    pub glass_positions: Block,
+    /// i8 x 3 per glass vertex, as the mesh's normals.
+    pub glass_normals: Block,
+    /// u8 x 3 per glass vertex.
+    pub glass_colors: Block,
+    /// u32 per glass index.
+    pub glass_indices: Block,
 }
 
 /// Everything the renderer needs to draw a frame.
@@ -274,6 +285,10 @@ pub struct Scene {
     pub spheres: SphereSet,
     pub cylinders: CylinderSet,
     pub mesh: Mesh,
+    /// The glass representation: a smooth surface over the atoms drawn as glass, each
+    /// vertex in the colour of the atom nearest it. Drawn after everything else, as glass
+    /// over what is inside it (`viewer/glass.ts`).
+    pub glass: Mesh,
     pub representation: String,
     pub drawn_atoms: u32,
     /// How many atoms and residues the ids in this scene span.
@@ -358,7 +373,12 @@ impl Scene {
             }
             cylinder[6] *= scale;
         }
-        for vertex in self.mesh.positions.chunks_mut(3) {
+        for vertex in self
+            .mesh
+            .positions
+            .chunks_mut(3)
+            .chain(self.glass.positions.chunks_mut(3))
+        {
             for (axis, value) in vertex.iter_mut().enumerate() {
                 *value = move_axis(*value, axis);
             }
@@ -385,7 +405,10 @@ impl Scene {
         // Asked before anything is moved in: a scene with nothing drawn has no extent, and
         // its bounds are a placeholder at the origin rather than a place.
         let drew = |scene: &Scene| {
-            !scene.spheres.is_empty() || !scene.cylinders.is_empty() || !scene.mesh.is_empty()
+            !scene.spheres.is_empty()
+                || !scene.cylinders.is_empty()
+                || !scene.mesh.is_empty()
+                || !scene.glass.is_empty()
         };
         let (had_geometry, adds_geometry) = (drew(self), drew(&other));
 
@@ -427,6 +450,7 @@ impl Scene {
             .indices
             .extend(other.mesh.indices.iter().map(|index| index + vertex_offset));
 
+        self.glass.append(other.glass);
         self.drawn_atoms += other.drawn_atoms;
         self.atom_count += other.atom_count;
         self.residue_count += other.residue_count;
@@ -472,6 +496,10 @@ impl Scene {
             mesh_colors: push_unorm8(&mut body, &self.mesh.colors),
             mesh_indices: push_u32(&mut body, &self.mesh.indices),
             mesh_vertex_residue: push_u32(&mut body, &self.mesh.vertex_residue),
+            glass_positions: push_f32(&mut body, &self.glass.positions),
+            glass_normals: push_snorm8(&mut body, &self.glass.normals),
+            glass_colors: push_unorm8(&mut body, &self.glass.colors),
+            glass_indices: push_u32(&mut body, &self.glass.indices),
         };
 
         let header = GeometryHeader {
@@ -481,6 +509,8 @@ impl Scene {
             cylinder_count: self.cylinders.len() as u32,
             vertex_count: self.mesh.vertex_count() as u32,
             triangle_count: self.mesh.triangle_count() as u32,
+            glass_vertex_count: self.glass.vertex_count() as u32,
+            glass_triangle_count: self.glass.triangle_count() as u32,
             drawn_atoms: self.drawn_atoms,
             atom_count: self.atom_count,
             residue_count: self.residue_count,

@@ -9,12 +9,12 @@ import type { SceneStyle } from "../ipc";
 import { capabilities, createContext, type GpuCapabilities } from "./gl";
 import { cross, invert, normalize, subtract, type Vec3 } from "./mat";
 import { PostPass } from "./post";
+import { GlassPass } from "./glass";
 import { decodeScene, type Scene } from "./scene";
 import {
   decodePick,
-  mergeMasks,
   srgbToLinear,
-  uploadSelection,
+  MaskTexture,
   SELECTION_TEXTURE_UNIT,
   type Picked,
   type ShadingUniforms,
@@ -126,10 +126,8 @@ export class Viewer {
    * know only which residue they belong to. The width doubles as the "is anything
    * selected" flag: zero means the shaders skip the lookup entirely.
    */
-  private atomMask: WebGLTexture | null = null;
-  private residueMask: WebGLTexture | null = null;
-  private atomMaskWidth = 0;
-  private residueMaskWidth = 0;
+  private atomMask: MaskTexture;
+  private residueMask: MaskTexture;
   /** The two masks as given, kept so either can change without the other being resent. */
   private selectedAtoms: Uint8Array | null = null;
   private selectedResidues: Uint8Array | null = null;
@@ -154,6 +152,8 @@ export class Viewer {
     gl.disable(gl.CULL_FACE); // cylinder and ribbon interiors are both visible
 
     this.post = new PostPass(gl);
+    this.atomMask = new MaskTexture(gl);
+    this.residueMask = new MaskTexture(gl);
     this.attachInput();
 
     // A context can be taken away - the GPU switched, the driver reset, too many contexts
@@ -245,17 +245,10 @@ export class Viewer {
   }
 
   private uploadMasks(): void {
-    const gl = this.gl;
-    this.atomMask ??= gl.createTexture();
-    this.residueMask ??= gl.createTexture();
     const atomCount = this.scene?.header.atom_count ?? 0;
     const residueCount = this.scene?.header.residue_count ?? 0;
-    const atoms = mergeMasks(atomCount, this.selectedAtoms, this.hoveredAtoms);
-    const residues = mergeMasks(residueCount, this.selectedResidues, this.hoveredResidues);
-    if (this.atomMask) this.atomMaskWidth = uploadSelection(gl, this.atomMask, atoms);
-    if (this.residueMask) {
-      this.residueMaskWidth = uploadSelection(gl, this.residueMask, residues);
-    }
+    this.atomMask.update(atomCount, this.selectedAtoms, this.hoveredAtoms);
+    this.residueMask.update(residueCount, this.selectedResidues, this.hoveredResidues);
     this.requestFrame();
   }
 
@@ -275,6 +268,14 @@ export class Viewer {
   get graphMode(): boolean {
     return this.graphOn;
   }
+
+  /**
+   * The glass representation (`glass.ts`): the scene's glass surface, drawn over
+   * everything else. Made the first time a scene has any.
+   */
+  private glass: GlassPass | null = null;
+  /** Whether the scene being drawn has glass in it. */
+  private glassOn = false;
 
   /** Dashes for contacts that are not bonds - found, not part of the structure's geometry. */
   private contactPass: import("./cylinders").CylinderPass | null = null;
@@ -441,6 +442,13 @@ export class Viewer {
     } else {
       this.mesh!.clear();
     }
+    this.glassOn = scene.header.glass_triangle_count > 0;
+    if (this.glassOn) {
+      this.glass ??= new GlassPass(this.gl);
+      this.glass.setMesh(scene.glassPositions, scene.glassNormals, scene.glassColors, scene.glassIndices);
+    } else {
+      this.glass?.setMesh(new Float32Array(0), new Int8Array(0), new Uint8Array(0), new Uint32Array(0));
+    }
 
     // Where the scene is, for the depth range - whether or not the camera moves to it.
     const { bounds_min: low, bounds_max: high } = scene.header;
@@ -465,6 +473,7 @@ export class Viewer {
     this.spheres?.setInstances(none);
     this.cylinders?.setInstances(none);
     this.mesh?.clear();
+    this.glassOn = false;
     this.selectedAtoms = null;
     this.selectedResidues = null;
     this.hoveredAtoms = null;
@@ -661,6 +670,7 @@ export class Viewer {
       background: style?.background ?? [1, 1, 1],
       roughness: style?.material.roughness ?? 0.28,
       specular: style?.material.specular ?? 0.5,
+      glow: this.glassOn ? 0.7 : 0,
     };
   }
 
@@ -729,11 +739,11 @@ export class Viewer {
       // Under the graph the structure is a ghost, and a ghost is not outlined: what is
       // selected is shown on the graph's own spheres.
       const ghost = this.graphOn;
-      this.bindSelection(this.residueMask);
-      this.mesh?.draw(view, projection, shading, ghost ? 0 : this.residueMaskWidth, false, this.rowState);
-      this.bindSelection(this.atomMask);
-      this.cylinders?.draw(view, projection, shading, ghost ? 0 : this.atomMaskWidth, false, this.rowState);
-      this.spheres?.draw(view, projection, shading, ghost ? 0 : this.atomMaskWidth, false, this.rowState);
+      this.bindSelection(this.residueMask.handle);
+      this.mesh?.draw(view, projection, shading, ghost ? 0 : this.residueMask.width, false, this.rowState);
+      this.bindSelection(this.atomMask.handle);
+      this.cylinders?.draw(view, projection, shading, ghost ? 0 : this.atomMask.width, false, this.rowState);
+      this.spheres?.draw(view, projection, shading, ghost ? 0 : this.atomMask.width, false, this.rowState);
       // Contacts, over the structure and under its outline: no mask, they are not selected.
       this.bindSelection(null);
       this.contactPass?.draw(view, projection, shading, 0, false, this.rowState);
@@ -771,13 +781,14 @@ export class Viewer {
       width,
       height,
       background,
-      occlusionStrength: this.style?.ambient_occlusion === false ? 0 : 0.75,
-      outlineStrength: this.style?.outline ? 1.0 : 0.0,
+      // Under glass the ribbons glow from within, and a shadow in a glowing thing is dirt.
+      occlusionStrength: this.style?.ambient_occlusion === false ? 0 : this.glassOn ? 0.2 : 0.75,
+      outlineStrength: this.style?.outline && !this.glassOn ? 1.0 : 0.0,
       antialias: 1.0,
       selectionColor: SELECTION_COLOR,
       hoverColor: HOVER_COLOR,
       // A line about two pixels wide, and nothing at all when nothing is selected.
-      selectionWidth: this.atomMaskWidth > 0 || this.residueMaskWidth > 0 ? 2.0 : 0.0,
+      selectionWidth: this.atomMask.width > 0 || this.residueMask.width > 0 ? 2.0 : 0.0,
       backgroundAlpha: this.transparent ? 0 : 1,
       fade: this.graphOn ? GHOST_FADE : 0,
       pixelScale: this.pixelScale,
@@ -785,6 +796,11 @@ export class Viewer {
     gl.enable(gl.DEPTH_TEST);
 
     if (this.graphOn && this.scene && this.graphData) this.drawGraph(width, height, background);
+    if (this.glassOn && this.scene && this.glass && !this.glass.empty) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, width, height);
+      this.glass.draw(this.camera.view(), this.camera.projection(this.aspect()), width, height, this.rowState);
+    }
     gl.flush();
   }
 
@@ -811,8 +827,8 @@ export class Viewer {
     gl.clear(gl.DEPTH_BUFFER_BIT);
     this.bindSelection(null);
     this.graphEdges?.draw(view, projection, shading, 0, false, this.rowState);
-    this.bindSelection(this.residueMask);
-    this.graphNodes?.draw(view, projection, shading, this.residueMaskWidth, false, this.rowState);
+    this.bindSelection(this.residueMask.handle);
+    this.graphNodes?.draw(view, projection, shading, this.residueMask.width, false, this.rowState);
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, width, height);
@@ -834,7 +850,7 @@ export class Viewer {
       antialias: 1.0,
       selectionColor: SELECTION_COLOR,
       hoverColor: HOVER_COLOR,
-      selectionWidth: this.residueMaskWidth > 0 ? 2.0 : 0.0,
+      selectionWidth: this.residueMask.width > 0 ? 2.0 : 0.0,
       backgroundAlpha: 0,
     });
     gl.disable(gl.BLEND);
@@ -934,9 +950,17 @@ export class Viewer {
    * image rather than an error.
    */
   captureDataUrl(): string {
+    return this.drawnCanvas().toDataURL("image/png");
+  }
+
+  /**
+   * The canvas with the view freshly drawn on it, to be copied from in this same task (see
+   * `captureDataUrl`) - into a smaller canvas, say, without encoding the whole frame first.
+   */
+  drawnCanvas(): HTMLCanvasElement {
     this.dirty = true;
     this.draw();
-    return this.canvas.toDataURL("image/png");
+    return this.canvas;
   }
 
   /** How tall the view is at the point it turns about, in angstroms: what a picture's height spans. */
@@ -1129,7 +1153,73 @@ export class Viewer {
    * target on every frame to serve a gesture that happens a few times a minute.
    */
   pickAt(client: { x: number; y: number }): Picked | null {
-    if (!this.scene || !this.gbuffer) return null;
+    if (!this.drawPick(client)) return null;
+    const gl = this.gl;
+    const pixel = new Uint8Array(4);
+    gl.readPixels(this.pickPixel[0], this.pickPixel[1], 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+    this.endPick();
+    return decodePick(pixel);
+  }
+
+  /** Where the last pick was drawn, in framebuffer pixels. */
+  private pickPixel: [number, number] = [0, 0];
+  private pickBuffer: WebGLBuffer | null = null;
+  /** The pick waiting for the GPU, if one is. */
+  private pickWaiting: { fence: WebGLSync; resolve: (picked: Picked | null) => void } | null = null;
+
+  /**
+   * `pickAt` without waiting: the pixel is copied into a buffer on the GPU and read back
+   * once a fence says the GPU has got there, a frame or two later. `pickAt` stops
+   * everything until the GPU has drawn the whole scene again; on a capsid that was a tenth
+   * of a second, every time the pointer moved. A pick asked for while one is waiting
+   * replaces it.
+   */
+  pickLater(client: { x: number; y: number }): Promise<Picked | null> {
+    const gl = this.gl;
+    if (this.pickWaiting) {
+      gl.deleteSync(this.pickWaiting.fence);
+      this.pickWaiting.resolve(null);
+      this.pickWaiting = null;
+    }
+    if (!this.drawPick(client)) return Promise.resolve(null);
+    this.pickBuffer ??= gl.createBuffer();
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pickBuffer);
+    gl.bufferData(gl.PIXEL_PACK_BUFFER, 4, gl.STREAM_READ);
+    gl.readPixels(this.pickPixel[0], this.pickPixel[1], 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    this.endPick();
+    const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!fence) return Promise.resolve(null);
+    gl.flush();
+    return new Promise((resolve) => {
+      this.pickWaiting = { fence, resolve };
+      const poll = () => {
+        const waiting = this.pickWaiting;
+        if (!waiting || waiting.fence !== fence) return;
+        const status = gl.clientWaitSync(fence, 0, 0);
+        if (status === gl.TIMEOUT_EXPIRED) {
+          requestAnimationFrame(poll);
+          return;
+        }
+        gl.deleteSync(fence);
+        this.pickWaiting = null;
+        if (status === gl.WAIT_FAILED) {
+          resolve(null);
+          return;
+        }
+        const pixel = new Uint8Array(4);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pickBuffer);
+        gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, pixel);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+        resolve(decodePick(pixel));
+      };
+      requestAnimationFrame(poll);
+    });
+  }
+
+  /** Draws the scene's ids into one pixel of the G-buffer; false when there is nothing to pick. */
+  private drawPick(client: { x: number; y: number }): boolean {
+    if (!this.scene || !this.gbuffer) return false;
     const gl = this.gl;
     const rect = this.canvas.getBoundingClientRect();
     const scale = this.canvas.width / Math.max(rect.width, 1);
@@ -1138,7 +1228,8 @@ export class Viewer {
     const x = Math.floor((client.x - rect.left) * scale);
     // GL's y runs up from the bottom, the pointer's down from the top.
     const y = this.canvas.height - 1 - Math.floor((client.y - rect.top) * scale);
-    if (x < 0 || y < 0 || x >= this.canvas.width || y >= this.canvas.height) return null;
+    if (x < 0 || y < 0 || x >= this.canvas.width || y >= this.canvas.height) return false;
+    this.pickPixel = [x, y];
 
     const view = this.camera.view();
     const projection = this.camera.projection(this.aspect());
@@ -1166,14 +1257,15 @@ export class Viewer {
       this.cylinders?.draw(view, projection, shading, 0, true);
       this.spheres?.draw(view, projection, shading, 0, true);
     }
+    return true;
+  }
 
-    const pixel = new Uint8Array(4);
-    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+  private endPick(): void {
+    const gl = this.gl;
     gl.disable(gl.SCISSOR_TEST);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     // The G-buffer now holds one pixel of ids, so the next frame has to be a real one.
     this.requestFrame();
-    return decodePick(pixel);
   }
 
   /** Called when the viewport is clicked without dragging: what was hit, or null. */
@@ -1230,23 +1322,18 @@ export class Viewer {
       }
     });
 
-    let lastHoverAt = 0;
-    let lastHoverX = -1;
-    let lastHoverY = -1;
+    let hoverTimer: ReturnType<typeof setTimeout> | undefined;
     canvas.addEventListener("pointermove", (event) => {
       if (!dragging) {
-        // A hover pick at most every 60 ms, and only once the pointer has actually moved:
-        // the draw behind a pick is the whole scene, scissored to one pixel, and running
-        // it on every event a trackpad emits would compete with the frame.
-        const now = performance.now();
-        const moved =
-          Math.abs(event.clientX - lastHoverX) + Math.abs(event.clientY - lastHoverY) >= 2;
-        if (this.onHover && moved && now - lastHoverAt >= 60) {
-          lastHoverAt = now;
-          lastHoverX = event.clientX;
-          lastHoverY = event.clientY;
-          this.onHover(this.pickAt({ x: event.clientX, y: event.clientY }));
-        }
+        // What is under the pointer, once it comes to rest: a pick draws the whole scene
+        // again, and asked on the way across a capsid it was most of every frame. Read
+        // back without waiting (`pickLater`), so even the one pick does not stall a frame.
+        if (!this.onHover) return;
+        clearTimeout(hoverTimer);
+        const at = { x: event.clientX, y: event.clientY };
+        hoverTimer = setTimeout(() => {
+          void this.pickLater(at).then((picked) => this.onHover?.(picked));
+        }, 80);
         return;
       }
       const dx = event.clientX - lastX;
@@ -1266,10 +1353,8 @@ export class Viewer {
       // pixels of slack, because a mouse moves a little under a finger.
       if (pressed && pressed.button === 0 && travelled < 3 && dragging !== "light") {
         const at = { x: event.clientX, y: event.clientY };
-        this.onPick?.(this.pickAt(Number.isFinite(at.x) ? at : pressed), {
-          shift: event.shiftKey,
-          toggle: event.metaKey || event.ctrlKey,
-        });
+        const modifiers = { shift: event.shiftKey, toggle: event.metaKey || event.ctrlKey };
+        void this.pickLater(Number.isFinite(at.x) ? at : pressed).then((picked) => this.onPick?.(picked, modifiers));
       }
       pressed = null;
       dragging = null;
@@ -1284,7 +1369,10 @@ export class Viewer {
     canvas.addEventListener("pointerup", stop);
     canvas.addEventListener("pointercancel", stop);
     // Leaving the canvas leaves nothing hovered.
-    canvas.addEventListener("pointerleave", () => this.onHover?.(null));
+    canvas.addEventListener("pointerleave", () => {
+      clearTimeout(hoverTimer);
+      this.onHover?.(null);
+    });
 
     // Double-click frames everything. The camera is easy to lose - a pan and a zoom and
     // the structure is off screen - and hunting for a button to get back is worse than

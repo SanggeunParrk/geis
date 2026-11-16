@@ -1,6 +1,6 @@
 // The shell: main menu, world select, and the settings screens behind it.
 
-import { cellBackdrop } from "./ui/cellBackdrop";
+import { cellStage } from "./ui/cellStage";
 import "./styles.css";
 import { api, events } from "./ipc";
 import { el, clear } from "./ui/dom";
@@ -20,6 +20,8 @@ type Screen = "menu" | "worlds" | "settings" | "viewer";
 type SettingsTab = "preferences" | "agents" | "compute" | "models" | "jobs";
 
 const root = document.querySelector<HTMLElement>("#app");
+// The cell behind the opening screens: one canvas for the life of the window.
+if (root && !document.body.classList.contains("panel-window")) document.body.prepend(cellStage.element);
 if (!root) throw new Error("#app is missing from index.html");
 
 const providers = providersPane();
@@ -67,8 +69,15 @@ function worlds(): WorldsHandle {
 /** Opens a world and shows it: this is what used to be "Viewer" on the menu. */
 async function enterWorld(id: string): Promise<void> {
   const handle = ensureViewer();
+  // Dark until the world is on screen, then put together over it - not assembled round an
+  // empty viewport that the molecule then pops into. A world that takes long to read is
+  // not waited for past a second and a half.
+  handle.hold();
   show("viewer");
-  await handle.openWorld(id);
+  const opened = handle.openWorld(id);
+  await Promise.race([opened.catch(() => {}), new Promise((resolve) => setTimeout(resolve, 1500))]);
+  handle.assemble();
+  await opened;
 }
 
 async function openInViewer(path: string): Promise<void> {
@@ -84,8 +93,6 @@ function mainMenu(): HTMLElement {
     // The window has no native title bar - the frame is an overlay, so the traffic lights
     // float over the content. Without a drag region the window cannot be moved at all,
     // and the main menu had none.
-    // The cell the app lives in, rendered by Blender: see `scripts/blender/cell_scene.py`.
-    cellBackdrop(),
     makeDraggable(el("div", { class: "window-drag" })),
     el(
       "div",
@@ -310,6 +317,10 @@ function panelWindow(): boolean {
 function show(screen: Screen): void {
   closeOverlay();
   clear(root!);
+  // The cell is behind the home screen, the worlds' place behind the shelf (the shelf
+  // asks for it); inside a world, or in the settings, nothing is drawn there.
+  if (screen === "menu") cellStage.home();
+  else if (screen !== "worlds") cellStage.hide();
   switch (screen) {
     case "menu":
       root!.append(mainMenu());

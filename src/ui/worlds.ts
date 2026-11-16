@@ -20,7 +20,7 @@
 
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api, type SceneRequest, type SceneStyle, type World, type WorldCard } from "../ipc";
-import { cellBackdrop, VESICLE, VESICLE_SPAN } from "./cellBackdrop";
+import { cellStage, ROW } from "./cellStage";
 import { count, el, replace } from "./dom";
 import { Viewer } from "../viewer/viewer";
 import { screenBar } from "./window";
@@ -36,16 +36,16 @@ export interface WorldsOptions {
   onBack: () => void;
 }
 
-/** How big each world is made, how far apart they stand, how far back the camera is. */
-const SIZE = 7;
-const SPACING = 21;
-const DISTANCE = 38;
-
-/** How much room a vesicle leaves around its world: its radius over the world's. */
-const VESICLE_ROOM = 1.45;
-
-/** How small a world one place off the middle is drawn. */
-const SHRINK = 0.62;
+/**
+ * How big each world is made, how far apart they stand, how far back the camera is, and
+ * how small a world one place off the middle is drawn. Shared with the cell the row stands
+ * in (`cellStage`), whose camera has to be this one exactly for each world to sit in its
+ * vesicle.
+ */
+const SIZE = ROW.size;
+const SPACING = ROW.spacing;
+const DISTANCE = ROW.distance;
+const SHRINK = ROW.shrink;
 
 /**
  * How the row moves: a critically damped spring, in stiffness and in radians a second.
@@ -67,6 +67,36 @@ const TURN_EASE = 4;
 /** How many molecules of a world are built into the row. */
 const MOLECULES_SHOWN = 4;
 
+/** The largest side a world's picture is kept at, in pixels: it stands about 900 points wide. */
+const PICTURE_SIDE = 1024;
+
+/**
+ * The angle each world's picture was taken at, by world. Kept on this machine beside the
+ * pictures' own folder rather than in the world: it is a fact about a picture, not about
+ * the world.
+ */
+const ANGLES_KEY = "geis.worlds.angles";
+
+function savedAngles(): Record<string, number> {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(ANGLES_KEY) ?? "{}");
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, number>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveAngle(id: string, angle: number): void {
+  try {
+    // Kept within a turn, so the number stays small however long a world has turned.
+    const angles = savedAngles();
+    angles[id] = angle % (2 * Math.PI);
+    localStorage.setItem(ANGLES_KEY, JSON.stringify(angles));
+  } catch {
+    /* the row then comes up at the angle it was left at */
+  }
+}
+
 export function worldsScreen(options: WorldsOptions): WorldsHandle {
   const canvas = el("canvas", { class: "worlds-canvas" });
   const left = el("button", { class: "worlds-arrow left", title: "Previous world (←)" }, arrow("‹"));
@@ -79,11 +109,9 @@ export function worldsScreen(options: WorldsOptions): WorldsHandle {
     el("img", { class: `worlds-thumb ${offset === 0 ? "here" : offset < 0 ? "before" : "after"}`, alt: "", hidden: "" }),
   );
   const thumbLayer = el("div", { class: "worlds-thumbs" }, ...thumbSlots);
-  // Each world lives in a vesicle, in the cell the shelf is set in: the far half of its
-  // membrane behind the row, the near half over it, so the world is inside.
-  const vesiclesBehind = el("div", { class: "vesicles back" });
-  const vesiclesOver = el("div", { class: "vesicles front" });
-  const space = el("div", { class: "worlds-space" }, vesiclesBehind, canvas, thumbLayer, vesiclesOver, left, right);
+  // Each world lives in a vesicle in the cell behind the page (`cellStage`); this canvas
+  // draws only the worlds, transparent around them, over the cell's.
+  const space = el("div", { class: "worlds-space" }, canvas, thumbLayer, left, right);
   const title = el("input", { class: "worlds-name", spellcheck: "false" });
   const detail = el("div", { class: "worlds-detail" });
   const dots = el("div", { class: "worlds-dots" });
@@ -98,7 +126,6 @@ export function worldsScreen(options: WorldsOptions): WorldsHandle {
     el(
       "div",
       { class: "worlds-body" },
-      cellBackdrop(true),
       space,
       el(
         "div",
@@ -149,6 +176,15 @@ export function worldsScreen(options: WorldsOptions): WorldsHandle {
   }
 
   async function refresh(): Promise<void> {
+    // Coming through from the cell: the worlds are kept back until the camera is here.
+    // Asked before anything is awaited - this runs as the screen is put on the page, so the
+    // shelf is hidden before its first paint. Asked after the list came back, the caption,
+    // the arrows and the row left from the last visit showed over the cell for a few frames.
+    if (cellStage.shelf(selected)) {
+      element.classList.add("arriving");
+      setTimeout(() => element.classList.remove("arriving"), 1250);
+    }
+    const before = new Map(cards.map((card, index) => [card.id, index]));
     cards = await api.worldsList();
     const active = await api.worldActive().catch(() => "");
     const at = cards.findIndex((card) => card.id === active);
@@ -156,12 +192,21 @@ export function worldsScreen(options: WorldsOptions): WorldsHandle {
     aim = selected;
     along = selected;
     speed = 0;
-    if (turns.length !== cards.length) {
-      turns = cards.map((_, index) => turns[index] ?? 0);
-      turning = cards.map((_, index) => turning[index] ?? 0);
-    }
+    cellStage.follow(along);
+    // Each world keeps its angle by id, so a world made or deleted does not hand its angle
+    // to its neighbour; one not seen yet this launch stands at the angle its picture was
+    // taken at, so the row comes up exactly as the picture shows it.
+    const angles = savedAngles();
+    turns = cards.map((card) => {
+      const was = before.get(card.id);
+      return was !== undefined ? (turns[was] ?? 0) : (angles[card.id] ?? 0);
+    });
+    turning = cards.map((card) => {
+      const was = before.get(card.id);
+      return was !== undefined ? (turning[was] ?? 0) : 0;
+    });
     drawCaption();
-    placeVesicles();
+    placeThumbs();
     // The arrow keys and Enter are listened for here, so here is where the focus goes:
     // arriving from the menu left it on the button that was pressed, and the shelf heard
     // nothing until it was clicked.
@@ -183,6 +228,7 @@ export function worldsScreen(options: WorldsOptions): WorldsHandle {
     drawCaption();
   }
 
+  /** Into the world in front: straight in, with nothing in the way. */
   function enter(): void {
     const card = cards[selected];
     if (card) options.onEnter(card.id);
@@ -221,44 +267,105 @@ export function worldsScreen(options: WorldsOptions): WorldsHandle {
       }),
     );
     if (at !== selected) return;
+    // Decoded before they are shown, off the main thread: a picture this size decoded as
+    // it is first painted held the window for 80 ms as the shelf faded in.
+    await Promise.all(
+      thumbSlots.map(async (slot, index) => {
+        const url = urls[index];
+        if (!url || slot.getAttribute("src") === url) return;
+        slot.src = url;
+        await slot.decode().catch(() => {});
+      }),
+    );
+    if (at !== selected) return;
     thumbSlots.forEach((slot, index) => {
-      const url = urls[index];
-      if (!url) {
-        slot.hidden = true;
-        return;
-      }
-      if (slot.getAttribute("src") !== url) slot.src = url;
-      slot.hidden = false;
+      slot.hidden = !urls[index];
     });
   }
 
   /**
-   * Takes a picture of the chosen world from the row, if it has none yet - a world that has
-   * not been left since pictures were kept - so the next visit shows it at once. The
-   * middle of the shelf's canvas is the chosen world, standing full size.
+   * The square a world in the row stands in, in the space's pixels: centred where its
+   * middle is drawn, as wide as it can reach turning (its longest half-side is `SIZE`, so a
+   * corner swings out to `SIZE` times the square root of three), shrunk as the row shrinks
+   * it. The picture is cut from this square and laid back over the same square, so the
+   * picture and the world it stands in for line up.
+   */
+  function standing(index: number): { x: number; y: number; side: number } {
+    const width = space.clientWidth;
+    const height = space.clientHeight;
+    const unit = height / 2 / (DISTANCE * Math.tan(ROW.fovY / 2));
+    const away = Math.min(Math.abs(index - along), 1);
+    const smooth = away * away * (3 - 2 * away);
+    const scale = 1 + (SHRINK - 1) * smooth;
+    return {
+      x: width / 2 + (index - along) * SPACING * unit,
+      // The camera looks at `ROW.lift` below the row, so the row stands that far above the middle.
+      y: height / 2 + ROW.lift * unit,
+      side: 2 * SIZE * 1.75 * unit * scale,
+    };
+  }
+
+  /**
+   * Takes a picture of the chosen world from the row once a visit, so the next visit shows
+   * it at once and as it looks now. Cut from the square it stands in (`standing`), and the
+   * angle the world stood at is kept with it, so the row comes up at that angle.
+   *
+   * The frame is copied straight into the small square, in the task that drew it. It was
+   * encoded whole as a PNG, decoded, cut and encoded again - two retina-sized encodes on
+   * the main thread, which stalled the row twice for 160 ms a second after it came up.
    */
   let picturing: number | null = null;
+  const pictured = new Set<string>();
   function pictureIfMissing(): void {
     if (picturing !== null) window.clearTimeout(picturing);
     // After the row has come to rest on it, not while it is still sliding past.
     picturing = window.setTimeout(() => {
       picturing = null;
       const card = cards[selected];
-      if (!live || !viewer || !card || card.molecules === 0 || thumbs.get(card.id)) return;
+      if (!live || !viewer || !card || card.molecules === 0 || pictured.has(card.id)) return;
+      if (Math.abs(along - selected) > 0.01) {
+        pictureIfMissing();
+        return;
+      }
+      pictured.add(card.id);
+      const box = standing(selected);
+      const angle = turns[selected] ?? 0;
       try {
-        const whole = new Image();
-        whole.onload = () => {
-          const side = Math.round(Math.min(whole.width, whole.height) * 0.8);
-          const crop = document.createElement("canvas");
-          crop.width = side;
-          crop.height = side;
-          crop.getContext("2d")?.drawImage(whole, (whole.width - side) / 2, (whole.height - side) / 2, side, side, 0, 0, side, side);
-          const data = crop.toDataURL("image/png");
-          void api.worldThumbnailSave(card.id, data).then(() => thumbs.delete(card.id)).catch(() => {});
-        };
-        whole.src = viewer.captureDataUrl();
+        const frame = viewer.drawnCanvas();
+        const ratio = frame.width / Math.max(space.clientWidth, 1);
+        const square = box.side * ratio;
+        const side = Math.max(1, Math.round(Math.min(square, PICTURE_SIDE)));
+        const k = side / square;
+        const crop = document.createElement("canvas");
+        crop.width = side;
+        crop.height = side;
+        // The whole frame drawn shifted, not a source rectangle cut from it: the square can
+        // reach past the canvas's top, and WebKit clips a source rectangle that does to
+        // the image and stretches what is left - the picture came out shifted.
+        crop
+          .getContext("2d")
+          ?.drawImage(frame, (square / 2 - box.x * ratio) * k, (square / 2 - box.y * ratio) * k, frame.width * k, frame.height * k);
+        crop.toBlob((blob) => {
+          if (!blob) {
+            pictured.delete(card.id);
+            return;
+          }
+          const reader = new FileReader();
+          reader.onload = () => {
+            if (typeof reader.result !== "string") return;
+            void api
+              .worldThumbnailSave(card.id, reader.result)
+              .then(() => {
+                thumbs.delete(card.id);
+                saveAngle(card.id, angle);
+              })
+              .catch(() => pictured.delete(card.id));
+          };
+          reader.readAsDataURL(blob);
+        }, "image/png");
       } catch {
         /* no picture this time; the next visit tries again */
+        pictured.delete(card.id);
       }
     }, 1200);
   }
@@ -320,8 +427,15 @@ export function worldsScreen(options: WorldsOptions): WorldsHandle {
     const mine = ++token;
     canvas.classList.add("loading");
     live = false;
-    // A picture taken since the last visit is the one to show.
+    // A picture taken since the last visit is the one to show, and the row is built
+    // because something changed, so each world is pictured again once it is up.
     thumbs.clear();
+    pictured.clear();
+    // The pictures stand in until the row is up, so the row has to come up as they show
+    // it: each world at the angle its picture was taken at. Unseen - the row is hidden
+    // while it builds - so nothing is seen to snap.
+    const angles = savedAngles();
+    turns = cards.map((card, index) => angles[card.id] ?? turns[index] ?? 0);
     void drawThumbs();
     try {
       await buildRow(mine);
@@ -334,7 +448,8 @@ export function worldsScreen(options: WorldsOptions): WorldsHandle {
     }
   }
 
-  async function buildRow(mine: number): Promise<void> {
+  /** The row's viewer, made the first time the row is drawn. */
+  function ensureViewer(): Viewer | null {
     if (!viewer) {
       try {
         viewer = new Viewer(canvas);
@@ -342,10 +457,13 @@ export function worldsScreen(options: WorldsOptions): WorldsHandle {
         // A shelf is looked at, not flown through.
         viewer.setInteractive(false);
       } catch {
-        canvas.classList.remove("loading");
-        return;
+        return null;
       }
     }
+    return viewer;
+  }
+
+  async function buildRow(mine: number): Promise<void> {
     built = signature();
     // The row's lighting is the first drawable world's as it is *now*. Kept from the
     // first build ever made, the shelf went on being lit by a world that had since been
@@ -389,27 +507,53 @@ export function worldsScreen(options: WorldsOptions): WorldsHandle {
       // before has to go: delete the only world with a molecule in it and that molecule
       // went on turning on the shelf, over a caption that said "empty".
       built = "";
-      viewer.clearScene();
+      viewer?.clearScene();
       canvas.classList.remove("loading");
       turn();
       return;
     }
     style = lighting;
+    // Coarse: four ribbons an inch across and turning. The full detail was seventeen
+    // megabytes to build and hand over - half a second of frozen window on the way in -
+    // and at that size it is the same picture.
+    let payload: Awaited<ReturnType<typeof api.buildScene>> | null = null;
     try {
-      viewer.setStyle(style);
-      // Coarse: four ribbons an inch across and turning. The full detail was seventeen
-      // megabytes to build and hand over - half a second of frozen window on the way in -
-      // and at that size it is the same picture.
-      const payload = await api.buildScene({ parts, style, coarse: true });
-      if (mine !== token) return;
-      // Not reframed: the camera is aimed along the row, not at whatever was loaded.
-      await viewer.setScene(payload, false);
+      payload = await api.buildScene({ parts, style, coarse: true });
     } catch {
       // A world whose file has moved still has a name and a place in the row; entering it
       // is where that is worth saying.
       built = "";
-      if (mine === token) viewer.clearScene();
     }
+    // The building above is the core's, off this thread; what follows - making the
+    // viewer, compiling its shaders, handing the row to the graphics card - holds the
+    // window for a tenth of a second or more. Done while the camera was still flying in
+    // from the cell, it was a hitch in the middle of the passage; once the camera is still,
+    // the pictures are standing in for the row and nothing is seen to stop.
+    await cellStage.settled();
+    if (mine !== token) return;
+    const shown = ensureViewer();
+    if (!shown) {
+      canvas.classList.remove("loading");
+      return;
+    }
+    if (payload) {
+      try {
+        shown.setStyle(style);
+        // Not reframed: the camera is aimed along the row, not at whatever was loaded.
+        await shown.setScene(payload, false);
+      } catch {
+        built = "";
+        if (mine === token) shown.clearScene();
+      }
+    } else {
+      shown.clearScene();
+    }
+    if (mine !== token) return;
+    // Laid out and posed before it is shown: the first frame it is seen in is already
+    // where the row is.
+    shown.lookAt([along * SPACING, ROW.lift, 0], DISTANCE, SIZE * 2.4);
+    shown.setRow(SPACING, along * SPACING, SHRINK, turns);
+    canvas.classList.toggle("instant", !thumbSlots[1].hidden);
     canvas.classList.remove("loading");
     turn();
   }
@@ -457,8 +601,9 @@ export function worldsScreen(options: WorldsOptions): WorldsHandle {
         turns[index] = (turns[index] ?? 0) + TURN_RATE *
           (want * seconds + (rate - want) * (1 - decay) / TURN_EASE);
       }
-      viewer.lookAt([along * SPACING, 0, 0], DISTANCE, SIZE * 2.4);
-      placeVesicles();
+      viewer.lookAt([along * SPACING, ROW.lift, 0], DISTANCE, SIZE * 2.4);
+      cellStage.follow(along);
+      placeThumbs();
       // The one in the middle is full size and its neighbours are smaller, as a character
       // select keeps the chosen one in front. Measured from where the camera actually is,
       // so a world grows on the way in rather than popping when it arrives.
@@ -467,53 +612,22 @@ export function worldsScreen(options: WorldsOptions): WorldsHandle {
     });
   }
 
-  /** One vesicle per world, its two halves; made as the shelf grows. */
-  const vesicles: { back: HTMLImageElement; front: HTMLImageElement }[] = [];
-
   /**
-   * Stands each world's vesicle where the world is drawn, at the size it is drawn.
-   *
-   * Worked out the way the row is posed rather than read back from the picture: the camera
-   * looks straight down the row from `DISTANCE`, so a world `dx` along it is `dx` times the
-   * pixels a unit spans at that distance from the middle, and it is shrunk by the same
-   * smoothed rule the shader uses (`rowScale`).
+   * Stands the pictures shown until the row is up where their worlds will be drawn: a
+   * world `dx` along the row is `dx` times the pixels a unit spans at the camera's
+   * distance from the middle of the screen.
    */
-  function placeVesicles(): void {
-    while (vesicles.length < cards.length) {
-      const back = el("img", { class: "vesicle", src: VESICLE.back, alt: "", draggable: "false" });
-      const front = el("img", { class: "vesicle", src: VESICLE.front, alt: "", draggable: "false" });
-      vesiclesBehind.append(back);
-      vesiclesOver.append(front);
-      vesicles.push({ back, front });
-    }
-    while (vesicles.length > cards.length) {
-      const gone = vesicles.pop();
-      gone?.back.remove();
-      gone?.front.remove();
-    }
-    const width = space.clientWidth;
-    const height = space.clientHeight;
-    if (width === 0 || height === 0) return;
-    const unit = height / 2 / (DISTANCE * Math.tan((20 * Math.PI) / 180));
-    vesicles.forEach(({ back, front }, index) => {
-      const dx = (index - along) * SPACING;
-      const away = Math.min(Math.abs(dx) / SPACING, 1);
-      const smooth = away * away * (3 - 2 * away);
-      const scale = 1 + (SHRINK - 1) * smooth;
-      const side = (2 * SIZE * VESICLE_ROOM * scale * unit) / VESICLE_SPAN;
-      const x = width / 2 + dx * unit - side / 2;
-      const y = height / 2 - side / 2;
-      const shown = x + side > 0 && x < width;
-      for (const half of [back, front]) {
-        half.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) scale(${(side / 100).toFixed(4)})`;
-        half.style.opacity = shown ? String(0.55 + 0.45 * (1 - smooth)) : "0";
-      }
-      // The pictures shown until the row is up stand in their vesicles too.
-      const slot = thumbSlots[index - selected + 1];
-      if (slot) slot.style.left = `${(x + side / 2).toFixed(1)}px`;
+  function placeThumbs(): void {
+    if (space.clientWidth === 0 || space.clientHeight === 0) return;
+    thumbSlots.forEach((slot, offset) => {
+      const box = standing(selected - 1 + offset);
+      slot.style.left = `${box.x.toFixed(1)}px`;
+      slot.style.top = `${box.y.toFixed(1)}px`;
+      slot.style.width = `${box.side.toFixed(1)}px`;
+      slot.style.height = `${box.side.toFixed(1)}px`;
     });
   }
-  new ResizeObserver(() => placeVesicles()).observe(space);
+  new ResizeObserver(() => placeThumbs()).observe(space);
 
   /**
    * Moves the camera towards the world that was chosen.

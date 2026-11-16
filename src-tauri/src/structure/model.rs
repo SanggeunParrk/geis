@@ -751,6 +751,44 @@ impl Structure {
 
     /// Finds a residue by chain id and author number, for applying secondary structure
     /// records after the atoms are in place.
+    /// The polymer residues a chain name names - by the same rule as
+    /// `residue_indices_in_range` - as (number, index) pairs sorted by number, so that the
+    /// residues in any range of numbers are found by bisection. For a caller asking about
+    /// many ranges of one chain: asking `residue_indices_in_range` for each walks every
+    /// residue of the structure each time.
+    pub fn numbered_residues(&self, chain_id: &str) -> Vec<(i32, usize)> {
+        let chain_id = chain_id.trim();
+        let is_author_id = self
+            .chains
+            .iter()
+            .any(|chain| chain.auth_id.trim() == chain_id);
+        let named: Vec<bool> = self
+            .chains
+            .iter()
+            .map(|chain| {
+                if is_author_id {
+                    chain.auth_id.trim() == chain_id
+                } else {
+                    chain.label_asym_id.trim() == chain_id || chain.id.trim() == chain_id
+                }
+            })
+            .collect();
+        let mut found: Vec<(i32, usize)> = self
+            .residues
+            .iter()
+            .enumerate()
+            .filter(|(_, residue)| {
+                matches!(
+                    residue.kind,
+                    ResidueKind::AminoAcid | ResidueKind::Nucleotide
+                ) && named.get(residue.chain_index as usize) == Some(&true)
+            })
+            .map(|(index, residue)| (residue.number, index))
+            .collect();
+        found.sort_unstable();
+        found
+    }
+
     pub fn residue_indices_in_range(
         &self,
         chain_id: &str,

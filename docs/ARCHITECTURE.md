@@ -157,6 +157,27 @@ and a broad spiralling ribbon becomes a tight corkscrew. The weights it uses (0.
 0.2870) are not arbitrary either: they cancel the radial component exactly at 100 degrees
 per residue, which is worth a test rather than a comment.
 
+### Where the helix meets the loop
+Inside a helix the path is generated as a helix about its fitted axis; elsewhere it is a
+spline through the trace. Both pass through the alpha carbon where they meet, but in
+different directions, and switching from one to the other bent the ribbon by up to
+eighty degrees at a single alpha carbon - the kinks at every helix end, and either side of
+a kink in a helix's axis. The helix is now eased in from the spline and back out to it by
+a smoothstep, whose slope is zero at the join, so the path leaves the join along the
+spline's own direction. A step that does not look like a helix's (outside 50-135 degrees
+round the axis, or nearer it than 1.6 A - a last residue pulled off towards the loop) is
+drawn as spline, and the per-residue axes are smoothed (1, 2, 1) along the run, since a
+four-residue window carries each irregularity of the helix as a wobble. Measured with
+the ignored test `geometry::cartoon::tests::kinks` (sharpest bends between samples over
+real files): haemoglobin's bends over 60 degrees went from 20 to none.
+
+The breadth of the ribbon is blended over four residues by the cubic B-spline's weights
+(`blended_profile`), not over the one stretch between two. Over one, a helix went from its
+full 1.15 A half-width to a 0.3 A thread in 3.8 A - after the path had already left the
+helix - and every helix ended in a broad flat flag standing out from the loop. Spread
+this way it starts narrowing at the helix's last residue, is a thread a residue later,
+and its edge has no corner at either end.
+
 ### The screen layout
 Blender's, and it took three tries to get right, so it is written down. The right side is
 one strip the full height of the window: outliner on top, properties underneath, and the
@@ -1542,24 +1563,201 @@ Found by timing each stage of opening the 1UF2 capsid, and fixed:
 - A scene's molecules are built at once, off the async runtime; a world's molecules, and
   the shelf's worlds, are opened at once rather than one after another.
 
-## The cell
+## The cell, and the worlds' place
 
-The home screen and the shelf are set inside a cell, rendered by Blender from
-`scripts/blender/cell_scene.py` (run it with `blender --background --factory-startup
---python scripts/blender/cell_scene.py -- src/assets/cell final all`). Everything in it is
-made from primitives and seeded noise: proteins are spheres pushed in and out at two
-scales, ribosomes two of them pressed together, filaments wandering tubes, the membrane a
-displaced sheet stippled with head groups, the haze a volume lit from behind. It renders
-in layers - the far cytoplasm, a few near molecules out of focus on transparency, and a
-vesicle in two halves - which the window lays over each other (`ui/cellBackdrop.ts`): the
-near layer moves against the far one with the pointer and on its own, slowly, and stops
-for anyone who has asked for less motion.
+The home screen and the shelf are drawn live behind the page (`ui/cellStage.ts`,
+`viewer/cellRenderer.ts`), in two places.
 
-On the shelf each world lives in a vesicle: the far half of its membrane is behind the 3D
-row and the near half over it, so the world is inside. Their places are worked out from
-how the row is posed - the camera looks down the row from a fixed distance, and a world
-off the middle is shrunk by the same smoothed rule the shader uses - so they follow the
-worlds as the row slides.
+- **The cell, behind the home screen.** Real molecules - ubiquitin, lysozyme, GFP,
+  haemoglobin, an antibody, growth hormone with its receptor, GroEL-GroES, the
+  SARS-CoV-2 spike, a tRNA - each read as its biological assembly by the app's own reader
+  and reduced to one bead per residue (`src-tauri/examples/cell_assets.rs` writes
+  `src/assets/cell/molecules.json`; the coordinates are CC0), ~1,500 copies drifting and
+  turning, and actin filaments built from the monomer on the filament's helix (27.5 A rise,
+  -166.7 degree twist). Nucleic acids too: nucleosomes (1KX5) and 70S ribosomes (4YBB)
+  from the same reader, and DNA and messenger RNA laid along smooth random curves - one
+  turn of B-DNA (ten pairs, two backbones 144 degrees apart) or ten nucleotides of RNA a
+  piece, each turned from the last by the bend alone (parallel transport), so a helix runs
+  on unbroken. Chromatin is beads on a string, a nucleosome every eighth turn; polysomes
+  are ribosomes strung along a message. DNA is amber and RNA rose, the warm few among cool
+  proteins. Every bead of every copy is one instanced draw of sphere impostors;
+  what moves each frame is each copy's place and rotation, eight floats in a float texture.
+  The look is the old Blender render's: lit mostly from behind by a blue glow deep in
+  the cell (the worlds' place shares it, so the tone holds on the way through), colours mostly teal and blue with
+  a few warm molecules, beads swollen into soft lumps, haze, depth of field, a vignette and
+  a little grain. The camera wanders on a path kept clear of molecules, with the space
+  ahead of it clear for the title.
+- **Small molecules and ions.** ATP, ADP, NAD+, haem, glucose and S-adenosylmethionine,
+  one bead per heavy atom from the Chemical Component Dictionary's ideal coordinates
+  (`cell_assets.rs` reads `<ID>_ideal.sdf` beside the entries), grouped and coloured by
+  element; and potassium, sodium, chloride, magnesium and calcium ions, single beads the
+  glass swells into droplets. Three hundred-odd molecules and four hundred-odd ions,
+  tumbling faster than the proteins. Their beads are marked (a negative radius) so the
+  glass view keeps them near the camera, where a protein's give way to its ribbon.
+- **Glass.** The cell's molecules are always drawn as glass (the opaque Goodsell look is
+  still in the renderer, but nothing asks for it; the button that switched is gone): each
+  a clear shell with its secondary structure inside. The glass is the viewport's own
+  (`GLASS_GLSL` in `viewer/glass.ts`): what is inside bent along the shell's slope and
+  tinted by the molecule's colour, its surroundings reflected by Schlick's Fresnel, two
+  highlights and a bright edge. Only the surroundings differ - the cell reflects its own
+  glow, never darker than what is behind (a dark floor reflected in each turned-away
+  lump was a dark patch on it) - and, because the shell is swollen beads, lumpy under its
+  smoothing, it is bent half as far and its highlights are a third as strong, or every
+  lump shows as a bubble with a glint. What is seen unbent is gathered only where it is
+  needed (off the glass, at its edge, where a chain is in front): doing both gathers on
+  every pixel of glass cost six frames a second. Inside, the copies within 50 units of the camera are
+  drawn as ribbons (`viewer/cellRibbon.ts`): from each molecule's trace atoms and
+  secondary structure, which `cell_assets.rs` writes beside its beads, by the viewport
+  cartoon's rules cut down. A helix is a helix about its own axis (the mean of a turn's
+  worth of alpha carbons, smoothed along the run), eased in from the spline and out to
+  it at its ends; a spline through alpha carbons 100 degrees apart is a rounded triangle,
+  and under glass every helix looked faceted. The face points out from a helix's axis
+  and across a strand's pleat, each made to agree with the one before (a helix matched
+  once, where it starts), so a section never turns a half turn between residues; the
+  breadth is blended over four residues by the B-spline, as the cartoon's is. Built once
+  when glass is first shown, at two details - ten points round and three to five
+  sections a residue within 28 units, six and two to three beyond (the fine ones
+  everywhere cost a quarter of the frame rate) - and drawn instanced, template by
+  template, for the near copies only. Further copies keep small vivid beads, where the
+  ribbons would be a blur anyway. The shell is the beads swollen to 2.8 times into a
+  half-size target that keeps only the nearest surface's normal, tint and depth. The
+  compose pass smooths that normal over a disc sized to the distance - wide enough that
+  the lumps where beads meet read as one shell rather than a bunch of grapes - and lays
+  the shell over the chain: clear where it faces the eye, bright towards its edge, with a
+  highlight. Its edge is how much of a ring of taps round the pixel is shell, and its
+  tint and normal are read from a tap that is: read at the pixel alone, the half-size
+  target's edge was a staircase two pixels a step, darkened where the pixel itself had
+  missed. Half size is what keeps it at frame rate - a full-size shell was 29 fps against
+  44 - since the swollen beads overdraw heavily, and moving them to their front point so
+  the depth test could skip them made every molecule look scaled like a fish.
+- **The worlds' place, behind the shelf.** Somewhere else: dark, quiet, a hundred-odd
+  molecules drifting and turning far behind the row and above and below it (never
+  between it and the camera), out of focus, under a thinner haze than the cell's; and the
+  worlds hanging in a row. It held grey dust before, which read as nothing in particular. Choosing Worlds sends the camera rushing into the cell's
+  light; at the fastest moment the window flashes and the camera comes out in the worlds'
+  place. Back reverses it. The camera there is the shelf viewer's exactly (`ROW` is
+  shared), so the worlds the shelf draws stand in that space. The flash is dark, not
+  light. Entering a world from the shelf is a plain cut: the rush belongs to the one
+  passage between the two places, and repeated on every world it was a wait.
+
+### The shelf's pictures
+
+Until the row is built, each world's picture stands in for it, and has to stand exactly
+where the world will. Both are one square (`standing` in `worlds.ts`): centred where the
+world's middle is drawn - which is above the screen's middle by the row's lift - as wide
+as the world can reach turning, shrunk as the row shrinks it. The picture is cut from that
+square and laid back over it. It was cut from the canvas's middle and laid in boxes set
+by percentages, so it was the wrong size and too low; and the square reaches past the
+canvas's top, where WebKit clips a source rectangle and stretches the rest, so it is cut
+by drawing the whole frame shifted instead. A picture is retaken once a visit, so an old
+one does not outlive a change.
+
+A world in the row turns, and its picture does not. The angle each picture was taken at
+is kept beside it (local storage, `geis.worlds.angles`), and a row about to be built
+stands each world at its picture's angle - unseen, since the row is hidden while it
+builds - so the row comes up exactly as the pictures show it, and the row appears under
+them at once while they fade off it. Before, the pictures stood at whatever angle they
+were taken at and the row came up upright: every launch, the worlds jumped.
+
+The picture is copied from the frame in the task that drew it, straight into a square
+of at most 1024 pixels, and encoded off the main thread (`toBlob`). It was encoded whole
+as a PNG, decoded, cut and encoded again: two retina-sized encodes, which stalled the row
+for 160 ms twice, a second after it came up. The pictures are decoded before they are
+shown (`img.decode()`), not when first painted as the shelf fades in.
+
+### Coming through to the shelf
+
+Three things made the way into the shelf stutter, measured as gaps between frames:
+
+- The shelf asked the cell to fly through only after the list of worlds had come back,
+  so for a few frames its caption, arrows and the row from the last visit showed over the
+  cell before it hid them. It asks first now, before anything is awaited, while the
+  screen is being put on the page.
+- The row was handed to the graphics card - a new viewer, its shaders, the geometry -
+  as soon as it was built, which was in the middle of the flight: a 95 ms hitch with the
+  camera at its fastest. The core still builds it at once, off the main thread, but the
+  hand-over waits for the camera to stop (`cellStage.settled()`), when the pictures are
+  standing in for the row and nothing moving is seen to stop.
+- The picture taken a second after arriving, above.
+
+### Keeping a capsid responsive
+
+A 1UF2 assembly is 3.5 million atoms, and anything per atom done on a hover or a click
+shows as a stall. Three were: selection masks crossed IPC as JSON arrays of numbers (seven
+megabytes to write and parse per hover - now raw bytes, `SelectionMask::encode`); the
+commands that build them ran on the main thread, which holds up the window's drawing
+(they and the other per-structure commands are `#[tauri::command(async)]`); and every
+mask upload allocated two buffers of that size and a new texture (`MaskTexture` reuses
+its storage and skips a kind whose inputs are unchanged). Picks read back through a
+fence a frame later (`pickLater`) instead of waiting for the GPU, and hover asks only
+once the pointer rests.
+
+## The glass representation
+
+Glass is a representation, beside cartoon and sticks (`Representation::Glass`): shown,
+hidden and shown-as the same way, on a molecule, a chain or a few residues (a feature).
+It was a third viewport mode at first, over every molecule at once in a fixed ramp of
+blues; as a representation it goes where it is asked for and is coloured as the atoms
+under it are - each vertex the colour of the atom nearest it, so under the default
+scheme the glass and the ribbon inside it are one chain's colour - unless the style gives
+it one of its own (`Style::glass`, "Glass colour of its own" in the style's panel,
+`glass_colour` to the agent). It draws no atoms, so it never decides the scene's primary
+representation while there is another.
+
+The core builds it with the rest of the scene (`Scene::glass`, wire version 3): a
+Gaussian surface over the glass atoms (`geometry/envelope.rs`) - Blinn blobs, one per atom
+or one per residue past 120,000 atoms, summed on a grid of at most six million points
+across the cores - blurred over about 2 A and meshed by surface nets, each vertex's normal
+the field's slope blended from its cell's eight corners. Unblurred, with each normal taken
+at the nearest corner, it was a bag of marbles under glass: every atom-sized lump two
+highlights and a bright crease where it met the next. Haemoglobin's takes 0.07 s; the
+1UF2 capsid's assembly, 1.6 million triangles, 0.87 s.
+
+The viewport draws it after the composite (`viewer/glass.ts`, posed with the shelf's row
+like the other geometry). The picture on the screen is copied aside, the surface's back
+faces are drawn into a depth texture of their own, and its front faces - depth first,
+then colour where nearest, so a fold shows its nearest layer - as glass (`GLASS_GLSL`,
+shared with the home screen's cell):
+
+- refracting: the picture behind is read displaced along the surface's slope, more
+  through thicker glass and at a steeper face, a little split by colour at the rim;
+- absorbing: tinted by the thickness the light came through (front to back face), so a
+  face is clear and a rim takes the atoms' colour;
+- reflecting its surroundings by Schlick's Fresnel - in the viewport a soft studio, a
+  bright sky and a dim floor, with two lamps - and a thin bright line where it turns away.
+
+The ribbons in a scene with glass are lit differently (`uGlow` in `SHADING_GLSL`): from
+within, in their own colour a little richer, brightest where they turn away, with the
+occlusion turned down and no outline - a glowing core, so they read through the glass
+and its reflections instead of greying under them.
+
+## Floating panels, and a world coming together
+
+On trial: the viewport is the whole window and the panels stand over it as a game's HUD
+does (`floating` on the viewer screen, remembered; the Layout menu puts them back
+beside it). The bar runs along the top and the status line along the foot, both
+translucent; the tools and the conversation are panels of smoked glass down either side;
+the viewport's pane loses its title strip and its own controls stand clear of the bar
+and the panels. The columns' dividers have nothing to divide and go.
+
+Entering a world holds the screen dark until the world is on screen (at most a second
+and a half), then puts it together (`assemble`): the viewport out of a bright blur, then
+the bar, the tools, the panel either side and the status line, one after another, each a
+bright line drawn across and widening into the panel, with a flicker as it settles.
+Assembled round an empty viewport, the molecule popped in after the panels.
+
+## Colour features at scale
+
+Colouring a selection writes features: residue ranges with a colour. A selection
+scattered over a capsid - its hydrophobic core - is a hundred thousand ranges, and
+colouring repeatedly added more over the old ones. One world grew to 24 MB, read on every
+listing, opening and save, which was the stall on the way to the shelf; and the scene
+builder found each range's residues by walking the whole structure, so the world never
+finished drawing. Now: a feature can carry many ranges (`ranges: "53,57-58,61"`); colouring
+writes one feature per chain; stored features are compacted to what each residue ends up as
+(`compact_features`) when worlds are read or written; and the scene builder sorts each chain
+name's residues once and finds every range by bisection. That world went from 21.6 MB to
+0.69 MB, and from never drawing to drawing in four seconds.
 
 ## The name, and the data from before it
 

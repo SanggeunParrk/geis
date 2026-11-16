@@ -24,6 +24,7 @@ uniform int uLightCount;
 uniform vec3 uAmbient;
 uniform float uRoughness;
 uniform float uSpecular;
+uniform float uGlow;
 
 vec3 shade(vec3 baseColor, vec3 normal, vec3 viewDir) {
   // Ambient stands in for a uniform sky. Occlusion is applied later, in the composite,
@@ -42,6 +43,17 @@ vec3 shade(vec3 baseColor, vec3 normal, vec3 viewDir) {
     vec3 halfway = normalize(toLight + viewDir);
     float specular = pow(max(dot(normal, halfway), 0.0), shininess) * specularScale;
     result += uLightColor[index] * (baseColor * diffuse + vec3(specular));
+  }
+  // Under glass the ribbons are lit from within, as the cores of glass illustrations are:
+  // their own colour, a little richer, brightest where the ribbon turns away - a glowing
+  // tube rather than a painted one - so they read through the glass and its reflections
+  // instead of greying under them.
+  if (uGlow > 0.0) {
+    float facing = clamp(dot(normal, viewDir), 0.0, 1.0);
+    float luma = dot(baseColor, vec3(0.2126, 0.7152, 0.0722));
+    vec3 rich = max(mix(vec3(luma), baseColor, 1.35), vec3(0.0));
+    vec3 glow = rich * (0.75 + 0.35 * facing) + rich * pow(1.0 - facing, 2.0) * 1.1;
+    result = mix(result, glow, uGlow);
   }
   return result;
 }
@@ -84,6 +96,8 @@ export interface ShadingUniforms {
   background: [number, number, number];
   roughness: number;
   specular: number;
+  /** How far the surfaces are lit from within (the glass view's ribbons), 0 to 1. */
+  glow?: number;
 }
 
 export interface UniformSetter {
@@ -147,6 +161,7 @@ export function setShadingUniforms(
   gl.uniform3fv(program.uniform("uAmbient"), new Float32Array(ambient));
   gl.uniform1f(program.uniform("uRoughness"), uniforms.roughness);
   gl.uniform1f(program.uniform("uSpecular"), uniforms.specular);
+  gl.uniform1f(program.uniform("uGlow"), uniforms.glow ?? 0);
 }
 
 /** Fragment outputs shared by the geometry passes, for the G-buffer. */
@@ -311,32 +326,6 @@ export const MASK_SELECTED = 255;
 /** The mask level of a hovered one: read as ~0.5, and drawn in the hover colour. */
 export const MASK_HOVERED = 128;
 
-/**
- * Merges a selection mask and a hover mask into the levels the texture carries.
- *
- * Selection wins where both apply - hovering the thing already selected should not
- * demote its outline to the hover colour.
- */
-export function mergeMasks(
-  length: number,
-  selected: Uint8Array | null,
-  hovered: Uint8Array | null,
-): Uint8Array | null {
-  if (!selected && !hovered) return null;
-  const merged = new Uint8Array(length);
-  if (hovered) {
-    for (let index = 0; index < Math.min(length, hovered.length); index += 1) {
-      if (hovered[index] > 0) merged[index] = MASK_HOVERED;
-    }
-  }
-  if (selected) {
-    for (let index = 0; index < Math.min(length, selected.length); index += 1) {
-      if (selected[index] > 0) merged[index] = MASK_SELECTED;
-    }
-  }
-  return merged;
-}
-
 /** What a picked pixel means. `null` is the background. */
 export interface Picked {
   /** `edge` is a bond in the graph view, by its place in the graph's list of them. */
@@ -360,36 +349,85 @@ export function decodePick(pixel: Uint8Array): Picked | null {
 export const SELECTION_TEXTURE_UNIT = 4;
 
 /**
- * Uploads a mask and returns the texture width, or 0 when nothing is selected.
+ * A selection mask as a texture, kept between uploads.
  *
- * `null` clears it: an empty mask and no mask are the same picture, and the shader's
- * `uSelectionWidth <= 0` path costs nothing.
+ * Its storage and its staging buffer are reused, so pointing at another residue of a
+ * three-million-atom capsid writes the bytes again rather than allocating two buffers
+ * of that size and a new texture each time - which was a frame's worth of work on every
+ * hover. A kind whose inputs are the same arrays as last time is not touched at all.
  */
-export function uploadSelection(
-  gl: WebGL2RenderingContext,
-  texture: WebGLTexture,
-  mask: Uint8Array | null,
-): number {
-  gl.activeTexture(gl.TEXTURE0 + SELECTION_TEXTURE_UNIT);
-  gl.bindTexture(gl.TEXTURE_2D, texture);
-  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-  if (!mask || mask.length === 0) {
-    // One black pixel, so the sampler is always complete even with nothing selected.
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(1));
-    return 0;
+export class MaskTexture {
+  private texture: WebGLTexture | null = null;
+  private staging = new Uint8Array(0);
+  private textureWidth = 0;
+  private textureHeight = 0;
+  private last: [number, Uint8Array | null, Uint8Array | null] | null = null;
+  /** The width the shaders are given: 0 when nothing is marked. */
+  width = 0;
+
+  constructor(private gl: WebGL2RenderingContext) {}
+
+  get handle(): WebGLTexture | null {
+    return this.texture;
   }
-  const width = Math.min(1024, mask.length);
-  const height = Math.ceil(mask.length / width);
-  const padded = new Uint8Array(width * height);
-  // Copied as levels, not as flags. An R8 texture is *normalised*, so the caller has to
-  // hand over 0, 128 or 255 - a mask of ones arrives in the shader as 1/255, which reads
-  // as "not selected" under any threshold. Two levels because the same channel carries
-  // both the selection (255) and the hover (128); see `MASK_SELECTED` and `MASK_HOVERED`.
-  padded.set(mask);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, padded);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  return width;
+
+  /** Merges the selection over the hover and uploads it, unless neither changed. */
+  update(length: number, selected: Uint8Array | null, hovered: Uint8Array | null): void {
+    const last = this.last;
+    if (last && last[0] === length && last[1] === selected && last[2] === hovered) return;
+    this.last = [length, selected, hovered];
+    const gl = this.gl;
+    this.texture ??= gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0 + SELECTION_TEXTURE_UNIT);
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    if (length === 0 || (!selected && !hovered)) {
+      // The shader's `uSelectionWidth <= 0` path never samples, but the sampler still has
+      // to be complete: one black pixel when there is no texture yet.
+      if (this.textureWidth === 0) {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, 1, 1, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(1));
+        this.parameters();
+      }
+      this.width = 0;
+      return;
+    }
+    const width = Math.min(1024, length);
+    const height = Math.ceil(length / width);
+    if (this.staging.length !== width * height) this.staging = new Uint8Array(width * height);
+    const merged = this.staging;
+    merged.fill(0);
+    // Levels, not flags: an R8 texture is normalised, so a mask of ones would arrive as
+    // 1/255. Two levels because the one channel carries both the selection (255) and
+    // the hover (128); see `MASK_SELECTED` and `MASK_HOVERED`.
+    if (hovered) {
+      const end = Math.min(length, hovered.length);
+      for (let index = 0; index < end; index += 1) if (hovered[index] !== 0) merged[index] = MASK_HOVERED;
+    }
+    if (selected) {
+      const end = Math.min(length, selected.length);
+      for (let index = 0; index < end; index += 1) if (selected[index] !== 0) merged[index] = MASK_SELECTED;
+    }
+    if (width !== this.textureWidth || height !== this.textureHeight) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, merged);
+      this.parameters();
+      this.textureWidth = width;
+      this.textureHeight = height;
+    } else {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, merged);
+    }
+    this.width = width;
+  }
+
+  /** Forgets what was uploaded, so the next update writes again (a new scene, say). */
+  invalidate(): void {
+    this.last = null;
+  }
+
+  private parameters(): void {
+    const gl = this.gl;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
 }

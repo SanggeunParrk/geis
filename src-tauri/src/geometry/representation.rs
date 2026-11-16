@@ -23,10 +23,15 @@ pub enum Representation {
     BallAndStick,
     Sticks,
     Backbone,
+    /// A smooth surface over the atoms, drawn as glass over whatever else they are shown
+    /// as: a cartoon in glass is the usual pairing. It draws no atoms of its own, and is
+    /// built after the others (`Scene::glass`).
+    Glass,
 }
 
-/// Every representation, in the order they are drawn. Cartoon first so its ribbon is the
-/// first thing in the mesh, which keeps the scene's primary representation meaningful.
+/// Every representation that draws atoms, in the order they are drawn. Cartoon first so its
+/// ribbon is the first thing in the mesh, which keeps the scene's primary representation
+/// meaningful. Glass is not among them: it is a surface over the others, built after them.
 pub const ALL_REPRESENTATIONS: [Representation; 5] = [
     Representation::Cartoon,
     Representation::Spacefill,
@@ -43,6 +48,7 @@ impl Representation {
             Representation::BallAndStick => "Ball and stick",
             Representation::Sticks => "Sticks",
             Representation::Backbone => "Backbone",
+            Representation::Glass => "Glass",
         }
     }
 
@@ -53,6 +59,7 @@ impl Representation {
             Representation::BallAndStick => "ball-and-stick",
             Representation::Sticks => "sticks",
             Representation::Backbone => "backbone",
+            Representation::Glass => "glass",
         }
     }
 
@@ -72,7 +79,7 @@ impl Representation {
             Representation::BallAndStick => 0.24,
             Representation::Sticks => 0.30,
             Representation::Backbone => 0.36,
-            Representation::Cartoon | Representation::Spacefill => 0.22,
+            Representation::Cartoon | Representation::Spacefill | Representation::Glass => 0.22,
         }
     }
 
@@ -84,12 +91,14 @@ impl Representation {
             // A cartoon's atoms are its ligands, which are read on their own and can
             // afford to be a touch chunkier than a whole chain of them.
             Representation::Cartoon => (vdw * 0.25).max(0.3),
-            Representation::Sticks | Representation::Backbone => self.bond_radius(),
+            Representation::Sticks | Representation::Backbone | Representation::Glass => {
+                self.bond_radius()
+            }
         }
     }
 
     fn draws_bonds(self) -> bool {
-        self != Representation::Spacefill
+        !matches!(self, Representation::Spacefill | Representation::Glass)
     }
 }
 
@@ -147,6 +156,11 @@ pub struct Style {
     /// with no exceptions.
     #[serde(default = "yes")]
     pub heteroatoms_by_element: bool,
+    /// The glass's own colour. When unset the glass takes the colour of the atoms under
+    /// it - its chain's, under the default scheme - so the glass and the ribbon inside it
+    /// agree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glass: Option<[f32; 3]>,
 }
 
 fn default_scheme() -> ColorScheme {
@@ -168,6 +182,7 @@ impl Default for Style {
             ramp: Ramp::default(),
             material: Material::default(),
             heteroatoms_by_element: true,
+            glass: None,
         }
     }
 }
@@ -185,9 +200,13 @@ impl Style {
     /// The representation that decides scene-wide settings - the bond radius, and what the
     /// legend describes. The first in the list, so the order is the user's priority.
     pub fn primary(&self) -> Representation {
+        // Glass is a surface over the others rather than a way of drawing atoms, so it
+        // decides nothing while there is another.
         self.representations
-            .first()
+            .iter()
             .copied()
+            .find(|representation| *representation != Representation::Glass)
+            .or_else(|| self.representations.first().copied())
             .unwrap_or(Representation::Cartoon)
     }
 }
@@ -224,6 +243,154 @@ pub struct Feature {
     /// heteroatoms-by-element, everything takes it otherwise.
     #[serde(default)]
     pub colour: Option<[f32; 3]>,
+    /// Several ranges at once, as `"53,57-58,61"`; `from` and `to` are then their first
+    /// and last. One feature for every scattered residue a selection covers was a hundred
+    /// bytes each, and a capsid's hydrophobic core coloured was a hundred thousand of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ranges: Option<String>,
+}
+
+impl Feature {
+    /// The ranges it covers, each as (first, last) with first <= last.
+    pub fn spans(&self) -> Vec<(i32, i32)> {
+        let one = (self.from.min(self.to), self.from.max(self.to));
+        let Some(ranges) = &self.ranges else {
+            return vec![one];
+        };
+        let parsed: Vec<(i32, i32)> = ranges
+            .split(',')
+            .filter_map(|part| {
+                let part = part.trim();
+                // A negative number is a residue number too: "-3--1" is -3 to -1.
+                let split = part
+                    .char_indices()
+                    .skip(1)
+                    .find(|&(_, c)| c == '-')
+                    .map(|(at, _)| at);
+                match split {
+                    Some(at) => {
+                        let (a, b): (i32, i32) =
+                            (part[..at].parse().ok()?, part[at + 1..].parse().ok()?);
+                        Some((a.min(b), a.max(b)))
+                    }
+                    None => part.parse().ok().map(|n: i32| (n, n)),
+                }
+            })
+            .collect();
+        if parsed.is_empty() {
+            vec![one]
+        } else {
+            parsed
+        }
+    }
+}
+
+/// The same features, as few as say the same thing.
+///
+/// A colour given to a selection is added as features over the residues it covers, and
+/// colouring again adds more over the old ones rather than replacing them: a capsid
+/// coloured a few dozen times carried two hundred thousand features, twenty-four megabytes
+/// read back every time its world was listed, opened or saved. This works out what each
+/// residue ends up as - the way `build_scene_among` applies them: the last colour, the last
+/// representations asked for, hidden if any feature hid it - and says that again as runs
+/// of neighbouring residues that end up alike.
+///
+/// Features are grouped by the chain name they use. A name used in a range too long to
+/// spread out (more than 20,000 numbers) is left exactly as it was.
+pub fn compact_features(features: &[Feature]) -> Vec<Feature> {
+    #[derive(Clone, PartialEq)]
+    struct End {
+        show: Vec<Representation>,
+        hide: bool,
+        colour: Option<[u32; 3]>,
+    }
+    const WIDEST: i64 = 20_000;
+    // Each chain name in the order of its last feature, so that where two names reach the
+    // same residues (an author letter and a label), the one used last is still applied last.
+    let mut names: Vec<&str> = Vec::new();
+    for feature in features.iter().rev() {
+        if !names.contains(&feature.chain.as_str()) {
+            names.push(&feature.chain);
+        }
+    }
+    names.reverse();
+    let mut out = Vec::new();
+    for name in names {
+        let mine: Vec<&Feature> = features
+            .iter()
+            .filter(|feature| feature.chain == name)
+            .collect();
+        if mine.iter().any(|feature| {
+            feature
+                .spans()
+                .iter()
+                .any(|&(from, to)| i64::from(to) - i64::from(from) > WIDEST)
+        }) {
+            out.extend(mine.into_iter().cloned());
+            continue;
+        }
+        let mut ends: std::collections::BTreeMap<i32, End> = std::collections::BTreeMap::new();
+        for feature in &mine {
+            for number in feature.spans().into_iter().flat_map(|(from, to)| from..=to) {
+                let end = ends.entry(number).or_insert(End {
+                    show: Vec::new(),
+                    hide: false,
+                    colour: None,
+                });
+                if !feature.show.is_empty() {
+                    end.show = feature.show.clone();
+                }
+                end.hide |= feature.hide;
+                if let Some(colour) = feature.colour {
+                    end.colour = Some(colour.map(f32::to_bits));
+                }
+            }
+        }
+        // Runs of neighbouring numbers that end up alike, then one feature for each way of
+        // ending up, carrying all its runs.
+        let mut runs: Vec<(i32, i32, End)> = Vec::new();
+        for (number, end) in ends {
+            match runs.last_mut() {
+                Some((_, to, same)) if *to + 1 == number && *same == end => *to = number,
+                _ => runs.push((number, number, end)),
+            }
+        }
+        let mut kinds: Vec<(End, Vec<(i32, i32)>)> = Vec::new();
+        for (from, to, end) in runs {
+            if end.show.is_empty() && !end.hide && end.colour.is_none() {
+                continue;
+            }
+            match kinds.iter_mut().find(|(kind, _)| *kind == end) {
+                Some((_, spans)) => spans.push((from, to)),
+                None => kinds.push((end, vec![(from, to)])),
+            }
+        }
+        for (end, spans) in kinds {
+            let ranges = (spans.len() > 1).then(|| {
+                spans
+                    .iter()
+                    .map(|&(from, to)| {
+                        if from == to {
+                            from.to_string()
+                        } else {
+                            format!("{from}-{to}")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            });
+            out.push(Feature {
+                chain: name.to_string(),
+                from: spans[0].0,
+                to: spans[spans.len() - 1].1,
+                show: end.show,
+                hide: end.hide,
+                colour: end.colour.map(|bits| bits.map(f32::from_bits)),
+                ranges,
+            });
+        }
+    }
+    out
 }
 
 impl Assignment {
@@ -302,13 +469,26 @@ pub fn build_scene_among(
     let mut extra_of: Vec<u32> = vec![0; if features.is_empty() { 0 } else { atom_count }];
     let mut hidden: Vec<bool> = vec![false; extra_of.len()];
     let mut own_color: Vec<Option<[f32; 3]>> = vec![None; extra_of.len()];
+    let mut named: std::collections::HashMap<String, Vec<(i32, usize)>> =
+        std::collections::HashMap::new();
     for feature in features {
         // A range written backwards - "95 to 80", as a person or an agent may well say it -
         // means the same residues. Taken literally it matched nothing, and the feature
         // was silently dropped.
-        let (from, to) = (feature.from.min(feature.to), feature.from.max(feature.to));
-        let residues: Vec<usize> = structure
-            .residue_indices_in_range(&feature.chain, from, to)
+        // Each chain name's residues sorted by number once, then each range found in
+        // them by bisection: asked of the whole structure for every range, a capsid
+        // coloured residue by residue was billions of steps and never drew.
+        let numbered = named
+            .entry(feature.chain.clone())
+            .or_insert_with(|| structure.numbered_residues(&feature.chain));
+        let residues: Vec<usize> = feature
+            .spans()
+            .into_iter()
+            .flat_map(|(from, to)| {
+                let start = numbered.partition_point(|&(number, _)| number < from);
+                let end = numbered.partition_point(|&(number, _)| number <= to);
+                numbered[start..end].iter().map(|&(_, index)| index)
+            })
             .collect();
         let slot = if feature.show.is_empty() {
             0
@@ -580,6 +760,25 @@ pub fn build_scene_among(
                 );
             }
         }
+    }
+
+    // The glass, over every atom some style or feature shows as glass: the atoms that
+    // exist (hydrogens and, unless shown, waters left out), not hidden. In each atom's own
+    // colour - its chain's, unless something coloured it - or the style's glass colour.
+    let glass_atoms: Vec<usize> = (0..structure.atom_count())
+        .filter(|&atom| {
+            !is_hidden(atom)
+                && (style_of_atom(atom).draws(Representation::Glass)
+                    || extra_draws(atom, Representation::Glass))
+                && structure.elements[atom] != 1
+                && is_visible(structure, atom, options, Representation::Spacefill, &ribboned)
+        })
+        .collect();
+    if !glass_atoms.is_empty() {
+        scene.glass = super::envelope::envelope_of(structure, &glass_atoms, &|atom| {
+            style_of_atom(atom).glass.unwrap_or(atom_colors[atom])
+        });
+        drawn.extend(glass_atoms.iter().map(|&atom| atom as u32));
     }
 
     // Counted once even when two representations drew it.
@@ -1680,6 +1879,58 @@ mod tests {
     }
 
     #[test]
+    fn glass_is_a_surface_over_the_atoms_in_their_colours() {
+        let structure = protein_with_ligand();
+        let red = [0.9, 0.1, 0.1];
+        let style = Style {
+            representations: vec![Representation::Cartoon, Representation::Glass],
+            solid: Some(red),
+            ..Style::default()
+        };
+        let scene = draw(&structure, style.clone());
+        assert!(!scene.glass.is_empty(), "glass makes a surface");
+        // The glass is not atoms: no spheres for it, and the cartoon still decides.
+        assert_eq!(style.primary(), Representation::Cartoon);
+        // In the atoms' own colour unless it has one of its own.
+        assert!(scene
+            .glass
+            .colors
+            .chunks(3)
+            .all(|rgb| (rgb[0] - red[0]).abs() < 1e-6 && (rgb[1] - red[1]).abs() < 1e-6));
+        let blue = [0.1, 0.2, 0.9];
+        let own = draw(
+            &structure,
+            Style {
+                glass: Some(blue),
+                ..style
+            },
+        );
+        assert!(own.glass.colors.chunks(3).all(|rgb| (rgb[2] - blue[2]).abs() < 1e-6));
+        // And none without it.
+        assert!(draw(&structure, Style::default()).glass.is_empty());
+        // Over a few residues only, when a feature asks for it there.
+        let feature = Feature {
+            chain: "A".into(),
+            from: 1,
+            to: 1,
+            show: vec![Representation::Glass],
+            hide: false,
+            colour: None,
+            ranges: None,
+        };
+        let some = build_scene_with(
+            &structure,
+            SceneOptions::default(),
+            &[Assignment::everything(Style::default())],
+            &[feature],
+            &Default::default(),
+            false,
+        );
+        assert!(!some.glass.is_empty());
+        assert!(some.glass.vertex_count() < scene.glass.vertex_count());
+    }
+
+    #[test]
     fn a_nucleic_acid_strand_draws_cleanly() {
         // Phosphates 6.8 A apart, with a pyrimidine ring on each nucleotide.
         let mut atoms = Vec::new();
@@ -1728,6 +1979,7 @@ mod tests {
             show: Vec::new(),
             hide: true,
             colour: None,
+            ranges: None,
         }
     }
 
@@ -1802,6 +2054,7 @@ mod tests {
                 show: vec![Representation::Sticks],
                 hide: false,
                 colour: Some(red),
+                ranges: None,
             }],
             &super::super::SceneStyle::default(),
             false,
@@ -1862,5 +2115,72 @@ mod tests {
         // must be inside the bounds, or one of them is off screen.
         assert!(scene.bounds_min[0] < 1.0);
         assert!(scene.bounds_max[0] > 49.0);
+    }
+
+    #[test]
+    fn compacted_features_draw_the_same_and_are_few() {
+        let red = Some([1.0, 0.0, 0.0]);
+        let blue = Some([0.0, 0.0, 1.0]);
+        let feature = |chain: &str,
+                       from: i32,
+                       to: i32,
+                       show: Vec<Representation>,
+                       hide: bool,
+                       colour: Option<[f32; 3]>| Feature {
+            chain: chain.into(),
+            from,
+            to,
+            show,
+            hide,
+            colour,
+            ranges: None,
+        };
+        // Coloured red, then part of it blue, then all of it red again, residue by residue:
+        // the way repeated colouring piles features up.
+        let mut piled = vec![
+            feature("A_1", 1, 10, vec![], false, red),
+            feature("A_1", 4, 6, vec![], false, blue),
+        ];
+        for number in 1..=10 {
+            piled.push(feature("A_1", number, number, vec![], false, red));
+        }
+        piled.push(feature(
+            "A_1",
+            8,
+            9,
+            vec![Representation::Sticks],
+            false,
+            None,
+        ));
+        piled.push(feature("B_1", 3, 3, vec![], true, None));
+        let compact = compact_features(&piled);
+        // The two red runs either side of the sticks are one feature with two ranges.
+        let mut both = feature("A_1", 1, 10, vec![], false, red);
+        both.ranges = Some("1-7,10".into());
+        assert_eq!(
+            compact,
+            vec![
+                both,
+                feature("A_1", 8, 9, vec![Representation::Sticks], false, red),
+                feature("B_1", 3, 3, vec![], true, None),
+            ]
+        );
+        assert_eq!(compact[0].spans(), vec![(1, 7), (10, 10)]);
+        // Compacting what is compact changes nothing.
+        assert_eq!(compact_features(&compact), compact);
+    }
+
+    #[test]
+    fn a_range_too_long_to_spread_out_is_kept_as_it_was() {
+        let wide = Feature {
+            chain: "A".into(),
+            from: 1,
+            to: 100_000,
+            show: vec![],
+            hide: true,
+            colour: None,
+            ranges: None,
+        };
+        assert_eq!(compact_features(std::slice::from_ref(&wide)), vec![wide]);
     }
 }

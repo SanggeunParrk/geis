@@ -19,6 +19,7 @@
 
 pub mod cartoon;
 pub mod color;
+pub mod envelope;
 pub mod gltf;
 pub mod mesh;
 pub mod palette;

@@ -69,6 +69,8 @@ export interface StyleArgs {
   /** A flat colour, `#rrggbb`. Clears the scheme when given; `null` goes back to it. */
   colour?: string | null;
   heteroatoms_by_element?: boolean;
+  /** The glass's own colour, `#rrggbb`; `null` makes it follow the atoms under it. */
+  glass_colour?: string | null;
 }
 
 export interface Tool {
@@ -78,7 +80,7 @@ export interface Tool {
   run: (args: Record<string, unknown>) => Promise<unknown>;
 }
 
-export const REPRESENTATIONS = ["cartoon", "sticks", "spacefill", "ball-and-stick", "backbone"];
+export const REPRESENTATIONS = ["cartoon", "sticks", "spacefill", "ball-and-stick", "backbone", "glass"];
 export const SCHEMES = ["element", "chain", "residue-kind", "secondary", "confidence", "b-factor", "rainbow", "chainbow"];
 export const RAMPS = ["rainbow", "viridis", "blue-white-red"];
 
@@ -107,6 +109,10 @@ const styleProperties = {
   heteroatoms_by_element: {
     type: "boolean",
     description: "Keep oxygen red, nitrogen blue and sulfur yellow whatever the scheme says.",
+  },
+  glass_colour: {
+    type: ["string", "null"],
+    description: "The glass representation's own colour as #rrggbb. null (the default) makes the glass take the colour of the atoms under it - its chain's.",
   },
 };
 

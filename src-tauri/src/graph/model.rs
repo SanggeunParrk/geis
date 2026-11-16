@@ -648,6 +648,25 @@ pub enum GraphError {
 }
 
 impl Graph {
+    /// Every molecule's features said as few times as they need to be
+    /// (`compact_features`). Whether anything changed.
+    pub fn compact_features(&mut self) -> bool {
+        let mut changed = false;
+        for node in &mut self.nodes {
+            if let NodeKind::Molecule { features, .. } = &mut node.kind {
+                if features.len() < 2 {
+                    continue;
+                }
+                let compact = crate::geometry::representation::compact_features(features);
+                if compact.len() < features.len() {
+                    *features = compact;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
     pub fn node(&self, id: &str) -> Option<&Node> {
         self.nodes.iter().find(|node| node.id == id)
     }

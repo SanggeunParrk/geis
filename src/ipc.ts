@@ -202,7 +202,7 @@ export interface AppInfo {
   manifest_problems: { path: string; message: string }[];
 }
 
-export type Representation = "cartoon" | "spacefill" | "ball-and-stick" | "sticks" | "backbone";
+export type Representation = "cartoon" | "spacefill" | "ball-and-stick" | "sticks" | "backbone" | "glass";
 
 export const REPRESENTATION_LABELS: Record<Representation, string> = {
   cartoon: "Cartoon",
@@ -210,6 +210,7 @@ export const REPRESENTATION_LABELS: Record<Representation, string> = {
   "ball-and-stick": "Ball and stick",
   sticks: "Sticks",
   backbone: "Backbone",
+  glass: "Glass",
 };
 
 export type ColorScheme =
@@ -529,6 +530,8 @@ export interface Style {
   material: Material;
   /** Colour everything but carbon by element, whatever the scheme says. */
   heteroatoms_by_element: boolean;
+  /** The glass's own colour; unset, the glass takes the colour of the atoms under it. */
+  glass?: [number, number, number] | null;
 }
 
 /** A named flat colour. */
@@ -581,6 +584,23 @@ export interface Feature {
   hide?: boolean;
   /** Linear RGB, like a style's `solid`. */
   colour?: [number, number, number] | null;
+  /** Several ranges at once, as `"53,57-58,61"`; `from` and `to` are then the first and last. */
+  ranges?: string;
+}
+
+/** The ranges a feature covers, each as [first, last]. */
+export function featureSpans(feature: Feature): [number, number][] {
+  const whole: [number, number] = [Math.min(feature.from, feature.to), Math.max(feature.from, feature.to)];
+  if (!feature.ranges) return [whole];
+  const spans: [number, number][] = [];
+  for (const part of feature.ranges.split(",")) {
+    const match = /^\s*(-?\d+)(?:-(-?\d+))?\s*$/.exec(part);
+    if (!match) continue;
+    const a = Number(match[1]);
+    const b = match[2] === undefined ? a : Number(match[2]);
+    spans.push([Math.min(a, b), Math.max(a, b)]);
+  }
+  return spans.length > 0 ? spans : [whole];
 }
 
 /** A named set of residues of one molecule, as runs of author numbers within chains. */
@@ -722,8 +742,17 @@ export interface PickTarget {
 /** Which atoms and residues of a structure belong to a set of chains. */
 export interface SelectionMask {
   /** One byte per atom, 1 when selected. */
-  atoms: number[];
-  residues: number[];
+  atoms: Uint8Array;
+  residues: Uint8Array;
+}
+
+/** A mask as `SelectionMask::encode` writes it: two u32 counts, then the bytes. */
+function decodeMask(buffer: ArrayBuffer): SelectionMask {
+  const [atoms, residues] = new Uint32Array(buffer, 0, 2);
+  return {
+    atoms: new Uint8Array(buffer, 8, atoms),
+    residues: new Uint8Array(buffer, 8 + atoms, residues),
+  };
 }
 
 /** BioMol's three levels. */
@@ -1208,13 +1237,13 @@ export const api = {
     chains: string[],
     level?: { residue?: number; atom?: number; residues?: number[] },
   ) =>
-    invoke<SelectionMask>("selection_mask", {
+    invoke<ArrayBuffer>("selection_mask", {
       id,
       chains,
       residue: level?.residue ?? null,
       atom: level?.atom ?? null,
       residues: level?.residues ?? null,
-    }),
+    }).then(decodeMask),
   /** The screen layout - which areas, split how, showing what - as the frontend's JSON. */
   layoutLoad: () => invoke<string | null>("layout_load"),
   layoutSave: (layout: string) => invoke<void>("layout_save", { layout }),
@@ -1222,7 +1251,7 @@ export const api = {
   /** Evaluates a selection spec to a view. */
   selectView: (id: string, spec: SelectSpec) => invoke<CoreView>("select_view", { id, spec }),
   /** The viewport's masks for a view. */
-  viewMask: (id: string, view: CoreView) => invoke<SelectionMask>("view_mask", { id, view }),
+  viewMask: (id: string, view: CoreView) => invoke<ArrayBuffer>("view_mask", { id, view }).then(decodeMask),
   /** Counts and a label for a view, for the card. */
   describeView: (id: string, view: CoreView) => invoke<ViewSummary>("describe_view", { id, view }),
   /** Every world, newest use first. */
@@ -1262,6 +1291,7 @@ export const api = {
   findCore: (id: string) => invoke<number[]>("find_core", { id }),
   /** One of the analyses every structure gets when it is opened; see `structure_preset`. */
   structurePreset: (id: string, preset: PresetId) => invoke<ArrayBuffer>("structure_preset", { id, preset }),
+  /** A molecule's smooth outer surface, for the glass view (`geometry::envelope`). */
   /** Puts a cleared conversation where an undo can find it. */
   chatBinPut: (id: string, chat: WorldChat) => invoke<void>("chat_bin_put", { id, chat }),
   /** Takes a world's last cleared conversation back, if it is still there. */

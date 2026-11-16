@@ -3747,6 +3747,27 @@ export function nodeEditor(options: NodeEditorOptions): NodeEditorHandle {
             (value) => set({ heteroatoms_by_element: value }),
             persist,
           ),
+          // The glass follows the atoms under it - its chain's colour, by default - unless
+          // it is given one of its own.
+          style.representations.includes("glass")
+            ? checkbox(
+                "Glass colour of its own",
+                (style.glass ?? null) !== null,
+                (value) => set({ glass: value ? [0.45, 0.62, 0.92] : null }),
+                persist,
+              )
+            : null,
+          style.representations.includes("glass") && style.glass
+            ? colorField("Glass", {
+                value: unitToHex(style.glass),
+                onChange: (hex) => {
+                  set({ glass: hexToUnit(hex) });
+                  persist();
+                },
+                sampleViewport: options.sampleViewport,
+                setPickingCursor: options.setPickingCursor,
+              })
+            : null,
         ],
       },
       {

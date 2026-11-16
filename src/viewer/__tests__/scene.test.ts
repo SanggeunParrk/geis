@@ -44,6 +44,11 @@ function encode(options: {
     { uints: meshPositions.filter((_, index) => index % 3 === 0).map(() => 0xffffffff) }, // colours
     { uints: meshIndices },
     { uints: options.meshVertexResidue ?? [] },
+    // The glass: none.
+    { floats: [] },
+    { uints: [] },
+    { uints: [] },
+    { uints: [] },
   ];
 
   const body: number[] = [];
@@ -66,12 +71,14 @@ function encode(options: {
   void body;
 
   const header = {
-    version: options.version ?? 2,
+    version: options.version ?? 3,
     representation: "cartoon",
     sphere_count: spheres.length / 4,
     cylinder_count: 0,
     vertex_count: meshPositions.length / 3,
     triangle_count: options.triangleCountOverride ?? meshIndices.length / 3,
+    glass_vertex_count: 0,
+    glass_triangle_count: 0,
     drawn_atoms: spheres.length / 4,
     // The id space the masks are keyed by, and where each merged part starts in it.
     atom_count: sphereAtoms.length,
@@ -98,6 +105,10 @@ function encode(options: {
       mesh_colors: blocks[8],
       mesh_indices: blocks[9],
       mesh_vertex_residue: blocks[10],
+      glass_positions: blocks[11],
+      glass_normals: blocks[12],
+      glass_colors: blocks[13],
+      glass_indices: blocks[14],
     },
   };
 
