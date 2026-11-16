@@ -61,7 +61,7 @@ pub fn catalogue() -> Vec<LocalModel> {
             summary: "The one to take. Reasons before it answers and calls tools reliably.".into(),
             file: "qwen3.8-9b-q4_k_m.gguf".into(),
             url: "https://huggingface.co/empero-ai/Qwen3.8-9B-Distill-GGUF/resolve/main/Qwen3.8-9B-Q4_K_M.gguf".into(),
-            size: 5_780_000_000,
+            size: 5_780_090_176,
             licence: "Apache-2.0".into(),
             tool_use: ToolUse::Good,
             thinks: true,
@@ -74,7 +74,7 @@ pub fn catalogue() -> Vec<LocalModel> {
             summary: "The same generation in half the memory. For a laptop with 8 GB.".into(),
             file: "qwen3.8-4b-q4_k_m.gguf".into(),
             url: "https://huggingface.co/empero-ai/Qwen3.8-4B-Distill-GGUF/resolve/main/Qwen3.8-4B-Q4_K_M.gguf".into(),
-            size: 2_783_000_000,
+            size: 2_783_446_304,
             licence: "Apache-2.0".into(),
             tool_use: ToolUse::Fair,
             thinks: true,
@@ -89,7 +89,7 @@ pub fn catalogue() -> Vec<LocalModel> {
             // The llama.cpp project's own conversion, which is the one its server is tested
             // against.
             url: "https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q4_K_M.gguf".into(),
-            size: 18_973_000_000,
+            size: 19_403_684_480,
             licence: "Apache-2.0".into(),
             tool_use: ToolUse::Good,
             thinks: true,

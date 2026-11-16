@@ -8,14 +8,20 @@ A workbench for protein structures: open or fetch a structure, look at it, style
 what holds it together, render a figure of it, and run structure prediction on your own
 machines - with an assistant in the side panel that can do all of the same things.
 
-Version 0.1.0. macOS (Apple silicon) is the platform it is built and tested on.
+Version 0.1.1. macOS (Apple silicon) is the platform it is built and tested on.
 
 ## Download
 
 The macOS app for Apple silicon is on the [Releases](../../releases) page: download the
-`.dmg` and drag Geis to Applications. It is not signed by Apple yet, so macOS stops it the
-first time - right-click Geis in Applications and choose **Open**, or run
-`xattr -dr com.apple.quarantine /Applications/Geis.app` once.
+`.dmg`, open it, and drag Geis to Applications.
+
+It is not notarised by Apple yet, so macOS stops it the first time it is opened:
+
+- **macOS 15 or later:** open Geis once and dismiss the warning, then go to System Settings
+  > Privacy & Security, scroll down to "Geis was blocked", and choose **Open Anyway**.
+- **macOS 14 or earlier:** right-click Geis in Applications and choose **Open**.
+- **Or, on any version,** run this once in Terminal:
+  `xattr -dr com.apple.quarantine /Applications/Geis.app`
 
 ## Build from source
 

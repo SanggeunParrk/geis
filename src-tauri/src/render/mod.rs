@@ -48,10 +48,41 @@ pub fn locate() -> Option<PathBuf> {
         "/snap/bin/blender",
         r"C:\Program Files\Blender Foundation\Blender\blender.exe",
     ];
-    candidates
+    if let Some(found) = candidates
         .iter()
         .map(PathBuf::from)
         .find(|path| path.is_file())
+    {
+        return Some(found);
+    }
+    // A Mac's other places: an app dragged into the user's own Applications, or one kept
+    // under its version's name beside another - "Blender 4.2.app". The newest name first.
+    let mut folders = vec![PathBuf::from("/Applications")];
+    if let Some(home) = std::env::var_os("HOME") {
+        folders.push(PathBuf::from(home).join("Applications"));
+    }
+    newest_blender_app(&folders)
+}
+
+/// The Blender with the latest name among the apps in `folders` - `Blender.app`,
+/// `Blender 4.2.app`, `Blender 5.2.app` - by the executable inside it.
+fn newest_blender_app(folders: &[PathBuf]) -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = folders
+        .iter()
+        .filter_map(|folder| std::fs::read_dir(folder).ok())
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("Blender") && name.ends_with(".app"))
+        })
+        .map(|app| app.join("Contents/MacOS/Blender"))
+        .filter(|path| path.is_file())
+        .collect();
+    found.sort();
+    found.pop()
 }
 
 fn which(program: &str) -> Option<PathBuf> {
@@ -818,5 +849,25 @@ mod tests {
         assert_eq!(preparing.fraction, None);
         assert_eq!(preparing.stage, "Loading render kernels");
         assert!(read_progress("[render] wrote it").is_none());
+    }
+
+    #[test]
+    fn a_blender_kept_under_its_version_s_name_is_found_newest_first() {
+        let root = std::env::temp_dir().join(format!("geis-blender-{}", uuid::Uuid::new_v4()));
+        let mine = root.join("Applications");
+        for name in ["Blender 4.2.app", "Blender 5.2.app", "Blenderbot.txt"] {
+            let executable = mine.join(name).join("Contents/MacOS");
+            std::fs::create_dir_all(&executable).unwrap();
+            if name.ends_with(".app") {
+                std::fs::write(executable.join("Blender"), b"").unwrap();
+            }
+        }
+        let found = newest_blender_app(&[root.join("nowhere"), mine.clone()]);
+        assert_eq!(
+            found,
+            Some(mine.join("Blender 5.2.app/Contents/MacOS/Blender"))
+        );
+        assert_eq!(newest_blender_app(&[root.join("nowhere")]), None);
+        std::fs::remove_dir_all(&root).ok();
     }
 }
